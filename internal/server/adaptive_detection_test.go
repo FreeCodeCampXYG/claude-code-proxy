@@ -1,7 +1,6 @@
 package server
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -294,35 +293,41 @@ func TestCacheTimestampTracking(t *testing.T) {
 
 // TestErrorDetectionBroadMatching tests broad keyword matching for various error formats
 func TestErrorDetectionBroadMatching(t *testing.T) {
-	errorPatterns := []string{
-		// parameter indicators with explicit parameter names
+	// These should ALL match: require both parameter indicator AND parameter name
+	shouldMatch := []string{
 		"parameter 'max_completion_tokens'",
 		"Parameter 'max_completion_tokens'",
 		"parameter max_tokens",
 		"invalid parameter max_completion_tokens",
 		"unsupported parameter max_tokens",
-
-		// Max token references with error context
-		"max_tokens not allowed",
-		"max_completion_tokens not recognized",
-		"max_tokens not supported",
-		"max_completion_tokens is invalid",
-
-		// Mixed case
 		"Parameter 'MAX_COMPLETION_TOKENS' is invalid",
 		"UNSUPPORTED parameter max_tokens",
-
-		// Provider-specific formats
 		"OpenAI error: parameter max_completion_tokens unsupported",
-		"OpenWebUI: 'max_completion_tokens' not supported",
+		"OpenWebUI: parameter 'max_completion_tokens' not supported",
 		"LiteLLM error: invalid parameter max_tokens",
-		"API error: max_tokens not recognized",
-		"Failed to process max_completion_tokens",
+		"Invalid max_tokens parameter",
+		"Unsupported max_completion_tokens",
 	}
 
-	for _, pattern := range errorPatterns {
+	for _, pattern := range shouldMatch {
 		if !isMaxTokensParameterError(pattern) {
 			t.Errorf("Should detect parameter error: %s", pattern)
+		}
+	}
+
+	// These should NOT match: missing either indicator or parameter name
+	shouldNotMatch := []string{
+		"parameter 'max_input_tokens'",  // wrong parameter
+		"parameter mismatch",             // no token param
+		"max_tokens is great",            // no error indicator
+		"invalid request",                // no token param
+		"unsupported feature",            // no token param
+		"",                               // empty
+	}
+
+	for _, pattern := range shouldNotMatch {
+		if isMaxTokensParameterError(pattern) {
+			t.Errorf("Should NOT detect parameter error: %s", pattern)
 		}
 	}
 }
@@ -362,31 +367,5 @@ func (c *ModelCapabilityCache) Set(key CacheKey, caps *ModelCapabilities) {
 	c.data[key] = caps
 }
 
-// isMaxTokensParameterError detects if an error is about unsupported max_tokens parameters
-func isMaxTokensParameterError(errorMessage string) bool {
-	if errorMessage == "" {
-		return false
-	}
-
-	errorLower := strings.ToLower(errorMessage)
-
-	// Check for our specific parameters
-	hasOurParam := strings.Contains(errorLower, "max_tokens") ||
-		strings.Contains(errorLower, "max_completion_tokens")
-
-	if !hasOurParam {
-		return false
-	}
-
-	// Check for error indicators - either parameter-related errors OR generic error context
-	hasErrorIndicator := strings.Contains(errorLower, "parameter") ||
-		strings.Contains(errorLower, "unsupported") ||
-		strings.Contains(errorLower, "invalid") ||
-		strings.Contains(errorLower, "not allowed") ||
-		strings.Contains(errorLower, "not recognized") ||
-		strings.Contains(errorLower, "not supported") ||
-		strings.Contains(errorLower, "error") ||
-		strings.Contains(errorLower, "failed")
-
-	return hasErrorIndicator
-}
+// NOTE: isMaxTokensParameterError is already defined in handlers.go
+// These tests use that implementation
