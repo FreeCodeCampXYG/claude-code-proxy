@@ -216,7 +216,8 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	resp = request("/debug/logs/analytics?since=2026-07-16T10:30:00Z&until=2026-07-16T11:00:00Z")
+	const selectedRange = "since=2026-07-16T10:00:00Z&until=2026-07-16T11:40:00Z"
+	resp = request("/debug/logs/analytics?" + selectedRange)
 	if resp.StatusCode != fiber.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("analytics status = %d", resp.StatusCode)
@@ -227,8 +228,42 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if analytics.Total != 31 || analytics.Since != time.Date(2026, 7, 16, 10, 30, 0, 0, time.UTC) || analytics.Until != time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC) {
-		t.Fatalf("analytics = %#v, want total 31 with effective UTC bounds", analytics)
+	if analytics.Total != 101 || analytics.Since != time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC) || analytics.Until != time.Date(2026, 7, 16, 11, 40, 0, 0, time.UTC) {
+		t.Fatalf("analytics = %#v, want total 101 with effective UTC bounds", analytics)
+	}
+
+	resp = request("/debug/logs/events?" + selectedRange + "&limit=100&offset=0")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("first events page status = %d", resp.StatusCode)
+	}
+	var firstPage struct {
+		Events []diagnostics.Event `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&firstPage); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(firstPage.Events) != 100 {
+		t.Fatalf("first events page length = %d, want 100", len(firstPage.Events))
+	}
+
+	resp = request("/debug/logs/events?" + selectedRange + "&limit=100&offset=100")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("second events page status = %d", resp.StatusCode)
+	}
+	var secondPage struct {
+		Events []diagnostics.Event `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&secondPage); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(secondPage.Events) != 1 {
+		t.Fatalf("second events page length = %d, want 1", len(secondPage.Events))
 	}
 
 	resp = request("/debug/logs/analytics")
@@ -264,10 +299,17 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	text := string(page)
-	for _, required := range []string{"resolvedOptions().timeZone", "textContent", "Task grouping", "/debug/logs/analytics"} {
-		if !strings.Contains(text, required) { t.Fatalf("dashboard missing %q", required) }
+	for _, required := range []string{
+		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "完成状态", "请求详情", "确定要删除所有诊断记录吗？", "已完成",
+		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "events.set('limit',String(pageSize))", "events.set('offset',String(requestedOffset))", "$('previous').disabled=true;$('next').disabled=true", "pages(pageTotal,pageCount,requestedOffset)", "offset===requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':value}", "breakdown('models',a.by_model||[],localized)", "breakdown('providers',a.by_provider||[],localized)", "$('export').href=endpoint('/debug/logs/export',range)", "offset=0", "offset+pageSize>=total", "textContent", "/debug/logs/analytics",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("dashboard missing %q", required)
+		}
 	}
-	if strings.Contains(text, "innerHTML") { t.Fatal("dashboard must not render data with innerHTML") }
+	if strings.Contains(text, "innerHTML") {
+		t.Fatal("dashboard must not render data with innerHTML")
+	}
 }
 
 func TestCorrelationProbeStoresOnlyNamesAndPresence(t *testing.T) {
