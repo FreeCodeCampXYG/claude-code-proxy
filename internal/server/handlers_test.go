@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,11 +42,7 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openDiagnosticsTestStore(t)
 
 	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key"}
 	app := fiber.New()
@@ -84,11 +81,7 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 }
 
 func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
-	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openDiagnosticsTestStore(t)
 
 	cfg := &config.Config{OpenAIBaseURL: "http://127.0.0.1:1"}
 	app := fiber.New()
@@ -118,11 +111,7 @@ func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
 }
 
 func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
-	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openDiagnosticsTestStore(t)
 
 	app := fiber.New()
 	setupDiagnosticsEndpoints(app, store)
@@ -136,6 +125,20 @@ func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("expected forbidden, got %d", resp.StatusCode)
 	}
+}
+
+func openDiagnosticsTestStore(t *testing.T) *diagnostics.Store {
+	t.Helper()
+	store, err := diagnostics.Open(filepath.Join(t.TempDir(), "diagnostics.db"), diagnostics.StoreOptions{Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close diagnostics store: %v", err)
+		}
+	})
+	return store
 }
 
 func TestServerSetup(t *testing.T) {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,8 +89,7 @@ func Open(path string, options StoreOptions) (*Store, error) {
 	if busyTimeout <= 0 {
 		busyTimeout = 5 * time.Second
 	}
-	dsn := sqliteDSN(path, busyTimeout)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open diagnostics database: %w", err)
 	}
@@ -111,18 +109,6 @@ func Open(path string, options StoreOptions) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
-}
-
-func sqliteDSN(path string, busyTimeout time.Duration) string {
-	milliseconds := busyTimeout.Milliseconds()
-	if milliseconds < 1 {
-		milliseconds = 1
-	}
-	if path == ":memory:" {
-		return fmt.Sprintf("file:diagnostics?mode=memory&cache=shared&_pragma=busy_timeout%%28%d%%29", milliseconds)
-	}
-	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
-	return fileURL.String() + fmt.Sprintf("?_pragma=busy_timeout%%28%d%%29&_pragma=journal_mode%%28WAL%%29", milliseconds)
 }
 
 func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, enableWAL bool) error {
