@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 			t.Fatalf("unexpected upstream path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"provider secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"provider secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"prompt_tokens_details":{"cached_tokens":3},"cache_creation_input_tokens":4}}`)
 	}))
 	defer upstream.Close()
 
@@ -77,6 +78,39 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	}
 	if len(metadata.Attempts) != 1 || metadata.Attempts[0].StatusCode != http.StatusOK {
 		t.Fatalf("unexpected attempts: %+v", metadata.Attempts)
+	}
+	if event.AttemptCount != 1 || event.RetryCount != 0 || event.InputTokens != 1 || event.OutputTokens != 1 || event.CacheReadInputTokens != 3 || event.CacheCreationInputTokens != 4 || event.StopReason != "stop" || event.CompletionState != completionCompleted {
+		t.Fatalf("unexpected normalized diagnostics: %#v", event)
+	}
+}
+
+func TestInvalidInboundAPIKeyHasLocalAuthenticationDiagnostics(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls++ }))
+	defer upstream.Close()
+
+	store := openDiagnosticsTestStore(t)
+	cfg := &config.Config{AnthropicAPIKey: "expected", OpenAIBaseURL: upstream.URL}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":1,"messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	req.Header.Set("x-api-key", "wrong")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusUnauthorized || upstreamCalls != 0 {
+		t.Fatalf("status=%d upstream calls=%d, want 401 and no upstream call", resp.StatusCode, upstreamCalls)
+	}
+	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.CompletionState != completionLocalAuthentication || event.FailureKind != failureLocalAuthentication || event.AttemptCount != 0 {
+		t.Fatalf("invalid-key diagnostics = %#v", event)
 	}
 }
 
@@ -138,6 +172,106 @@ func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
 	}
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("expected forbidden, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
+	store := openDiagnosticsTestStore(t)
+	base := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 101; i++ {
+		if err := store.Insert(t.Context(), diagnostics.Event{RequestID: fmt.Sprintf("req-%03d", i), CreatedAt: base.Add(time.Duration(i)*time.Minute), StatusCode: 200, CompletionState: "completed"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := fiber.New()
+	setupDiagnosticsEndpoints(app, store)
+
+	bad := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics?since=2026-07-16", nil)
+	bad.RemoteAddr = "127.0.0.1:1234"
+	resp, err := app.Test(bad)
+	if err != nil || resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("invalid range status = %d, %v", resp.StatusCode, err)
+	}
+
+	analyticsReq := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics?since=2026-07-16T10:30:00Z&until=2026-07-16T11:00:00Z", nil)
+	analyticsReq.RemoteAddr = "127.0.0.1:1234"
+	resp, err = app.Test(analyticsReq)
+	if err != nil { t.Fatal(err) }
+	var analytics diagnostics.Analytics
+	if err := json.NewDecoder(resp.Body).Decode(&analytics); err != nil { t.Fatal(err) }
+	if analytics.Total != 31 || analytics.Since != time.Date(2026, 7, 16, 10, 30, 0, 0, time.UTC) || analytics.Until != time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC) {
+		t.Fatalf("analytics = %#v, want total 31 with effective UTC bounds", analytics)
+	}
+
+	allAnalyticsReq := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics", nil)
+	allAnalyticsReq.RemoteAddr = "127.0.0.1:1234"
+	resp, err = app.Test(allAnalyticsReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&analytics); err != nil {
+		t.Fatal(err)
+	}
+	if analytics.Total != 101 || !analytics.Since.IsZero() || !analytics.Until.IsZero() || analytics.TaskGroups == nil || analytics.ByModel == nil || analytics.ByProvider == nil || analytics.ByCompletionState == nil || analytics.HourlyTimeline == nil {
+		t.Fatalf("all analytics = %#v, want unbounded all-results and non-nil slices", analytics)
+	}
+
+	exportReq := httptest.NewRequest(http.MethodGet, "/debug/logs/export", nil)
+	exportReq.RemoteAddr = "127.0.0.1:1234"
+	resp, err = app.Test(exportReq)
+	if err != nil { t.Fatal(err) }
+	exported, _ := io.ReadAll(resp.Body)
+	if lines := strings.Count(strings.TrimSpace(string(exported)), "\n") + 1; lines != 101 {
+		t.Fatalf("exported lines = %d, want 101", lines)
+	}
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
+	pageReq.RemoteAddr = "127.0.0.1:1234"
+	resp, err = app.Test(pageReq)
+	if err != nil { t.Fatal(err) }
+	page, _ := io.ReadAll(resp.Body)
+	text := string(page)
+	for _, required := range []string{"resolvedOptions().timeZone", "textContent", "Task grouping", "/debug/logs/analytics"} {
+		if !strings.Contains(text, required) { t.Fatalf("dashboard missing %q", required) }
+	}
+	if strings.Contains(text, "innerHTML") { t.Fatal("dashboard must not render data with innerHTML") }
+}
+
+func TestCorrelationProbeStoresOnlyNamesAndPresence(t *testing.T) {
+	store := openDiagnosticsTestStore(t)
+	cfg := &config.Config{OpenAIBaseURL: "http://127.0.0.1:1"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{"))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	req.Header.Set("x-anthropic-session-id", "secret-session-value")
+	req.Header.Set("x-anthropic-parent-request-id", "secret-parent-value")
+	req.Header.Set("x-anthropic-billing-header", "cost_center=secret-cost; safe-key=secret-safe; invalid key=secret-invalid; bare-secret")
+	resp, err := app.Test(req)
+	if err != nil { t.Fatal(err) }
+	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
+	if err != nil { t.Fatal(err) }
+	metadata := string(event.Metadata)
+	if strings.Contains(metadata, "secret-session-value") || strings.Contains(metadata, "secret-parent-value") || strings.Contains(metadata, "secret-cost") || strings.Contains(metadata, "secret-safe") || strings.Contains(metadata, "secret-invalid") || strings.Contains(metadata, "bare-secret") {
+		t.Fatalf("correlation values leaked: %s", metadata)
+	}
+	if !strings.Contains(metadata, `"name":"x-anthropic-session-id","present":true`) || !strings.Contains(metadata, `"name":"x-anthropic-billing-header","present":true`) || !strings.Contains(metadata, `"name":"cost_center","present":true`) || !strings.Contains(metadata, `"name":"safe-key","present":true`) {
+		t.Fatalf("missing safe capability probe: %s", metadata)
+	}
+	if strings.Contains(metadata, `"name":"invalid key"`) || strings.Contains(metadata, `session_id+parent_request_id`) {
+		t.Fatalf("unsafe or inferred correlation candidate stored: %s", metadata)
+	}
+	if event.TaskHash != "" {
+		t.Fatalf("task identity must not be inferred, got %q", event.TaskHash)
+	}
+}
+
+func TestStrictRFC3339AcceptsOffsets(t *testing.T) {
+	value := "2026-07-16T18:30:00+08:00"
+	parsed, err := strictRFC3339(value)
+	if err != nil || parsed != time.Date(2026, 7, 16, 10, 30, 0, 0, time.UTC) || parsed.Location() != time.UTC {
+		t.Fatalf("strictRFC3339(%q) = %v, %v", value, parsed, err)
 	}
 }
 

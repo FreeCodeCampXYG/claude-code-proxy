@@ -33,10 +33,56 @@ jobs:
     - name: Build Windows binary
       run: go build -ldflags "-X github.com/claude-code-proxy/proxy/internal/server.ProxyVersion=${{ github.ref_name }}" -o claude-code-proxy.exe ./cmd/claude-code-proxy
 
-    - name: Smoke test Windows diagnostics
+    - name: Smoke test Windows runtime diagnostics
       shell: pwsh
       run: |
-        $env:OPENAI_BASE_URL = "http://127.0.0.1:1/v1"
+        $mockPort = 18083
+        $mock = Start-Job -ArgumentList $mockPort -ScriptBlock {
+          param($port)
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+          try {
+            $listener.Start()
+            Write-Output "MOCK_READY"
+            $client = $listener.AcceptTcpClient()
+            try {
+              $stream = $client.GetStream()
+              $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+              while (($line = $reader.ReadLine()) -ne $null -and $line -ne '') {}
+              $body = @'
+        data: {"choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}
+
+        data: [DONE]
+
+        '@
+              $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+              $headers = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+              $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headers)
+              $stream.Write($headerBytes, 0, $headerBytes.Length)
+              $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+              $stream.Flush()
+            } finally {
+              $client.Dispose()
+            }
+          } finally {
+            $listener.Stop()
+          }
+        }
+
+        $mockReady = $false
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+          if ((Receive-Job -Job $mock -Keep) -contains 'MOCK_READY') {
+            $mockReady = $true
+            break
+          }
+          if ($mock.State -in @('Completed', 'Failed', 'Stopped')) { break }
+          Start-Sleep -Milliseconds 100
+        }
+        if (-not $mockReady) { throw "mock upstream did not start: $($mock.State)" }
+
+        $env:OPENAI_BASE_URL = "http://127.0.0.1:$mockPort/v1"
+        $env:OPENAI_PROVIDER = "newapi"
         $env:PORT = "18082"
         $env:DIAGNOSTICS_DB_PATH = Join-Path $env:RUNNER_TEMP "claude-code-proxy-diagnostics.db"
         $process = Start-Process -FilePath "$PWD/claude-code-proxy.exe" -ArgumentList "-d" -PassThru
@@ -52,10 +98,37 @@ jobs:
           }
           if ($null -eq $health) { throw "proxy health endpoint did not become ready" }
           if ($health.diagnostics_enabled -ne $true) { throw "diagnostics were not enabled: $($health | ConvertTo-Json -Compress)" }
-          $logs = Invoke-WebRequest "http://127.0.0.1:18082/debug/logs" -UseBasicParsing -TimeoutSec 5
-          if ($logs.StatusCode -ne 200) { throw "diagnostics page returned $($logs.StatusCode)" }
+
+          $request = @{
+            model = "claude-sonnet-4"
+            max_tokens = 64
+            stream = $true
+            messages = @(@{ role = "user"; content = "smoke" })
+          } | ConvertTo-Json -Depth 5
+          $response = Invoke-WebRequest "http://127.0.0.1:18082/v1/messages" -Method Post -ContentType "application/json" -Body $request -UseBasicParsing -TimeoutSec 15
+          if ($response.StatusCode -ne 200) { throw "streaming request returned $($response.StatusCode)" }
+
+          $events = @($response.Content -split "`r?`n" | Where-Object { $_ -like 'data: *' } | ForEach-Object {
+            ($_ -replace '^data:\s*', '') | ConvertFrom-Json
+          })
+          $thinkingDeltas = @($events | Where-Object { $_.delta.type -eq 'thinking_delta' })
+          if ($thinkingDeltas.Count -lt 1 -or $thinkingDeltas[0].delta.thinking -ne 'thinking') {
+            throw "stream did not contain the expected thinking_delta: $($response.Content)"
+          }
+          if ($thinkingDeltas | Where-Object { $null -ne $_.delta.PSObject.Properties['text'] }) {
+            throw "thinking_delta contained invalid delta.text: $($response.Content)"
+          }
+          if (-not ($events | Where-Object { $_.type -eq 'message_stop' })) {
+            throw "stream did not contain message_stop: $($response.Content)"
+          }
+
+          $analytics = Invoke-RestMethod "http://127.0.0.1:18082/debug/logs/analytics" -TimeoutSec 5
+          if ([int]$analytics.total -lt 1) { throw "diagnostics analytics total was less than one: $($analytics | ConvertTo-Json -Compress)" }
+          if ($health.diagnostics_enabled -ne $true) { throw "diagnostics were not enabled" }
         } finally {
           if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          Stop-Job -Job $mock -ErrorAction SilentlyContinue
+          Remove-Job -Job $mock -Force -ErrorAction SilentlyContinue
         }
 
   release:

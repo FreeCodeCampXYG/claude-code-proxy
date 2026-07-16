@@ -138,7 +138,13 @@ type OpenAIChoice struct {
 
 // OpenAIUsage represents token usage in OpenAI format
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens             int                       `json:"prompt_tokens"`
+	CompletionTokens         int                       `json:"completion_tokens"`
+	TotalTokens              int                       `json:"total_tokens"`
+	PromptTokensDetails      OpenAIPromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
+}
+
+type OpenAIPromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }

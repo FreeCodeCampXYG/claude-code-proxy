@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +64,166 @@ func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	cleared, err := store.Clear(ctx)
 	if err != nil || cleared != 1 {
 		t.Fatalf("Clear() = %d, %v", cleared, err)
+	}
+}
+
+func TestStoreMigratesV1PreservingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE diagnostics_events (
+		request_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+		method TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '', status_code INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0,
+		streaming INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', request_body BLOB, response_body BLOB, metadata BLOB
+	); INSERT INTO diagnostics_events(request_id,created_at,updated_at,model,status_code) VALUES('legacy',1,2,'old-model',200); PRAGMA user_version=1;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store, err := Open(path, StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	event, err := store.Detail(t.Context(), "legacy")
+	if err != nil || event.Model != "old-model" || event.AttemptCount != 0 {
+		t.Fatalf("migrated event = %#v, %v", event, err)
+	}
+	var version int
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+		t.Fatalf("schema version = %d, %v", version, err)
+	}
+}
+
+func TestStoreRejectsNewerSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil { t.Fatal(err) }
+	if _, err := db.Exec("PRAGMA user_version=3"); err != nil { t.Fatal(err) }
+	_ = db.Close()
+	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("Open() error = %v, want newer schema rejection", err)
+	}
+}
+
+func TestStoreAnalyticsAggregatesNormalizedFields(t *testing.T) {
+	store := openTestStore(t, StoreOptions{})
+	base := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	events := []Event{
+		{RequestID: "ok", CreatedAt: base, Provider: "newapi", Model: "gpt", StatusCode: 200, Duration: 100 * time.Millisecond, Streaming: true, AttemptCount: 2, RetryCount: 1, InputTokens: 10, OutputTokens: 20, CacheReadInputTokens: 3, CacheCreationInputTokens: 2, CompletionState: "completed", TaskHash: "task-a"},
+		{RequestID:"truncated",CreatedAt:base.Add(time.Hour),Provider:"newapi",Model:"gpt",StatusCode:502,Duration:300*time.Millisecond,Streaming:true,AttemptCount:1,InputTokens:4,OutputTokens:5,CompletionState:"truncated",FailureKind:"truncated",Truncated:true},
+		{RequestID:"canceled",CreatedAt:base.Add(time.Hour),Provider:"openai",Model:"mini",StatusCode:502,Duration:200*time.Millisecond,AttemptCount:1,CompletionState:"canceled",FailureKind:"canceled",Canceled:true},
+	}
+	for _, event := range events { if err := store.Insert(t.Context(), event); err != nil { t.Fatal(err) } }
+	a, err := store.Analytics(t.Context(), Query{Since:base, Until:base.Add(2*time.Hour)})
+	if err != nil { t.Fatal(err) }
+	if a.Total != 3 || a.Success != 1 || a.Failure != 2 || a.Truncated != 1 || a.Canceled != 1 || a.Streaming != 2 || a.Retries != 1 || a.Attempts != 4 || a.AverageAttempts != 4.0/3.0 || a.InputTokens != 14 || a.OutputTokens != 25 || a.CacheReadInputTokens != 3 || a.CacheCreationInputTokens != 2 || a.AverageLatencyMS != 200 || a.P95LatencyMS != 300 || a.TaskGroupingUnavailable != 2 {
+		t.Fatalf("unexpected analytics: %#v", a)
+	}
+	if len(a.HourlyTimeline) != 2 || len(a.ByModel) != 2 || len(a.ByProvider) != 2 || len(a.ByCompletionState) != 3 || len(a.TaskGroups) != 1 {
+		t.Fatalf("unexpected breakdowns: %#v", a)
+	}
+}
+
+func TestStoreRepairsMissingV2Indexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	store, err := Open(path, StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP INDEX idx_diagnostics_events_model`); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	store, err = Open(path, StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var count int
+	if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_diagnostics_events_model'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repaired index count = %d, %v", count, err)
+	}
+}
+
+func TestStoreRejectsIncompatibleV2Schema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE diagnostics_events (request_id TEXT PRIMARY KEY); PRAGMA user_version=2;`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "missing required columns") {
+		t.Fatalf("Open() error = %v, want incompatible column rejection", err)
+	}
+}
+
+func TestStoreRejectsIncompatibleV2Index(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	store, err := Open(path, StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP INDEX idx_diagnostics_events_model; CREATE INDEX idx_diagnostics_events_model ON diagnostics_events(provider)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "index idx_diagnostics_events_model has columns") {
+		t.Fatalf("Open() error = %v, want incompatible index rejection", err)
+	}
+}
+
+func TestStoreAnalyticsPreservesOmittedBounds(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.FixedZone("offset", 8*60*60))
+	store := openTestStore(t, StoreOptions{Retention: time.Hour, Now: func() time.Time { return now }})
+	old := now.UTC().Add(-2 * time.Hour)
+	for _, event := range []Event{{RequestID: "old", CreatedAt: old}, {RequestID: "retained", CreatedAt: now.UTC()}} {
+		if err := store.Insert(t.Context(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analytics, err := store.Analytics(t.Context(), Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analytics.Total != 2 || !analytics.Since.IsZero() || !analytics.Until.IsZero() {
+		t.Fatalf("unbounded analytics = %#v, want both events with zero bounds", analytics)
+	}
+	events, err := store.Query(t.Context(), Query{Ascending: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported []string
+	if err := store.Export(t.Context(), Query{Ascending: true}, func(event Event) error {
+		exported = append(exported, event.RequestID)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != analytics.Total || fmt.Sprint(exported) != "[old retained]" {
+		t.Fatalf("all-results mismatch: analytics=%d events=%#v export=%v", analytics.Total, events, exported)
+	}
+}
+
+func TestStoreAnalyticsReturnsExplicitUTCBounds(t *testing.T) {
+	store := openTestStore(t, StoreOptions{})
+	since := time.Date(2026, 7, 16, 18, 0, 0, 0, time.FixedZone("offset", 8*60*60))
+	until := since.Add(time.Hour)
+	analytics, err := store.Analytics(t.Context(), Query{Since: since, Until: until})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSince := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	wantUntil := wantSince.Add(time.Hour)
+	if analytics.Since != wantSince || analytics.Until != wantUntil || analytics.Since.Location() != time.UTC || analytics.Until.Location() != time.UTC {
+		t.Fatalf("explicit bounds = %v..%v, want %v..%v UTC", analytics.Since, analytics.Until, wantSince, wantUntil)
 	}
 }
 
