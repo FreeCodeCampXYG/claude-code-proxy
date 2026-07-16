@@ -22,8 +22,8 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Download dependencies
-      run: go mod download
+    - name: Resolve module graph
+      run: go mod tidy
 
     - name: Run tests
       run: go test ./...
