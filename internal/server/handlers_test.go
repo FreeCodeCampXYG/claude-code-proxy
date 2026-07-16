@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -185,51 +186,83 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	}
 	app := fiber.New()
 	setupDiagnosticsEndpoints(app, store)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Listener(listener) }()
+	t.Cleanup(func() {
+		_ = app.Shutdown()
+		_ = listener.Close()
+	})
 
-	bad := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics?since=2026-07-16", nil)
-	bad.RemoteAddr = "127.0.0.1:1234"
-	resp, err := app.Test(bad)
-	if err != nil || resp.StatusCode != fiber.StatusBadRequest {
-		t.Fatalf("invalid range status = %d, %v", resp.StatusCode, err)
+	request := func(path string) *http.Response {
+		t.Helper()
+		for attempt := 0; attempt < 20; attempt++ {
+			resp, err := http.Get("http://" + listener.Addr().String() + path)
+			if err == nil {
+				return resp
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("request %s: proxy did not accept loopback connection", path)
+		return nil
 	}
 
-	analyticsReq := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics?since=2026-07-16T10:30:00Z&until=2026-07-16T11:00:00Z", nil)
-	analyticsReq.RemoteAddr = "127.0.0.1:1234"
-	resp, err = app.Test(analyticsReq)
-	if err != nil { t.Fatal(err) }
+	resp := request("/debug/logs/analytics?since=2026-07-16")
+	if resp.StatusCode != fiber.StatusBadRequest {
+		resp.Body.Close()
+		t.Fatalf("invalid range status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = request("/debug/logs/analytics?since=2026-07-16T10:30:00Z&until=2026-07-16T11:00:00Z")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("analytics status = %d", resp.StatusCode)
+	}
 	var analytics diagnostics.Analytics
-	if err := json.NewDecoder(resp.Body).Decode(&analytics); err != nil { t.Fatal(err) }
+	if err := json.NewDecoder(resp.Body).Decode(&analytics); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
 	if analytics.Total != 31 || analytics.Since != time.Date(2026, 7, 16, 10, 30, 0, 0, time.UTC) || analytics.Until != time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC) {
 		t.Fatalf("analytics = %#v, want total 31 with effective UTC bounds", analytics)
 	}
 
-	allAnalyticsReq := httptest.NewRequest(http.MethodGet, "/debug/logs/analytics", nil)
-	allAnalyticsReq.RemoteAddr = "127.0.0.1:1234"
-	resp, err = app.Test(allAnalyticsReq)
-	if err != nil {
-		t.Fatal(err)
+	resp = request("/debug/logs/analytics")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("all analytics status = %d", resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&analytics); err != nil {
+		resp.Body.Close()
 		t.Fatal(err)
 	}
+	resp.Body.Close()
 	if analytics.Total != 101 || !analytics.Since.IsZero() || !analytics.Until.IsZero() || analytics.TaskGroups == nil || analytics.ByModel == nil || analytics.ByProvider == nil || analytics.ByCompletionState == nil || analytics.HourlyTimeline == nil {
 		t.Fatalf("all analytics = %#v, want unbounded all-results and non-nil slices", analytics)
 	}
 
-	exportReq := httptest.NewRequest(http.MethodGet, "/debug/logs/export", nil)
-	exportReq.RemoteAddr = "127.0.0.1:1234"
-	resp, err = app.Test(exportReq)
-	if err != nil { t.Fatal(err) }
+	resp = request("/debug/logs/export")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("export status = %d", resp.StatusCode)
+	}
 	exported, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if lines := strings.Count(strings.TrimSpace(string(exported)), "\n") + 1; lines != 101 {
 		t.Fatalf("exported lines = %d, want 101", lines)
 	}
 
-	pageReq := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
-	pageReq.RemoteAddr = "127.0.0.1:1234"
-	resp, err = app.Test(pageReq)
-	if err != nil { t.Fatal(err) }
+	resp = request("/debug/logs")
+	if resp.StatusCode != fiber.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("dashboard status = %d", resp.StatusCode)
+	}
 	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	text := string(page)
 	for _, required := range []string{"resolvedOptions().timeZone", "textContent", "Task grouping", "/debug/logs/analytics"} {
 		if !strings.Contains(text, required) { t.Fatalf("dashboard missing %q", required) }
