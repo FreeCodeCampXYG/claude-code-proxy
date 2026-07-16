@@ -299,9 +299,15 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	text := string(page)
+	// Keep these contract fragments aligned with diagnosticsHTML. This deliberately
+	// validates the embedded dashboard's user-visible localization, exact finite
+	// range (`until`) behavior, race-safe pagination, and textContent-only rendering
+	// without requiring a browser test dependency. Pagination uses pageOffset inside
+	// pages() rather than the mutable global offset, so do not change this fragment
+	// to "offset+pageSize>=total".
 	for _, required := range []string{
 		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "完成状态", "请求详情", "确定要删除所有诊断记录吗？", "已完成",
-		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "events.set('limit',String(pageSize))", "events.set('offset',String(requestedOffset))", "$('previous').disabled=true;$('next').disabled=true", "pages(pageTotal,pageCount,requestedOffset)", "offset===requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':value}", "breakdown('models',a.by_model||[],localized)", "breakdown('providers',a.by_provider||[],localized)", "$('export').href=endpoint('/debug/logs/export',range)", "offset=0", "offset+pageSize>=total", "textContent", "/debug/logs/analytics",
+		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "events.set('limit',String(pageSize))", "events.set('offset',String(requestedOffset))", "$('previous').disabled=true;$('next').disabled=true", "pages(pageTotal,pageCount,requestedOffset)", "offset===requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':value}", "breakdown('models',a.by_model||[],localized)", "breakdown('providers',a.by_provider||[],localized)", "$('export').href=endpoint('/debug/logs/export',range)", "offset=0", "pageOffset+pageSize>=total", "textContent", "/debug/logs/analytics",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("dashboard missing %q", required)
