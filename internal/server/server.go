@@ -24,10 +24,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
-const (
-	// ProxyVersion is the current version of the Claude Code Proxy
-	ProxyVersion = "1.0.0"
-)
+// ProxyVersion is set by release builds with -ldflags. Development builds use this fallback.
+var ProxyVersion = "dev"
 
 // Start initializes and starts the HTTP server
 func Start(cfg *config.Config) error {
@@ -76,13 +74,22 @@ func Start(cfg *config.Config) error {
 	// Health check endpoint
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
-			"status":  "ok",
-			"version": ProxyVersion,
+			"status":              "ok",
+			"version":             ProxyVersion,
+			"diagnostics_enabled": diagnosticsStore != nil,
 		})
 	})
 
 	// Root endpoint - proxy info
 	app.Get("/", func(c *fiber.Ctx) error {
+		endpoints := fiber.Map{
+			"health":       "/health",
+			"messages":     "/v1/messages",
+			"count_tokens": "/v1/messages/count_tokens",
+		}
+		if diagnosticsStore != nil {
+			endpoints["diagnostics"] = "/debug/logs"
+		}
 		return c.JSON(fiber.Map{
 			"message": "Claude Code Proxy",
 			"version": ProxyVersion,
@@ -94,11 +101,7 @@ func Start(cfg *config.Config) error {
 				"sonnet_model":    getSonnetModel(cfg),
 				"haiku_model":     getHaikuModel(cfg),
 			},
-			"endpoints": fiber.Map{
-				"health":       "/health",
-				"messages":     "/v1/messages",
-				"count_tokens": "/v1/messages/count_tokens",
-			},
+			"endpoints": endpoints,
 		})
 	})
 

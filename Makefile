@@ -17,7 +17,8 @@ GOMOD=$(GOCMD) mod
 GOFMT=$(GOCMD) fmt
 
 # Build flags
-LDFLAGS=-ldflags "-s -w"
+VERSION ?= dev
+LDFLAGS=-ldflags "-s -w -X github.com/claude-code-proxy/proxy/internal/server.ProxyVersion=$(VERSION)"
 
 # Default target
 all: build

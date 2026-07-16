@@ -110,6 +110,36 @@ func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestDebugLogsAllowLoopback(t *testing.T) {
+	store := openDiagnosticsTestStore(t)
+
+	app := fiber.New()
+	setupDiagnosticsEndpoints(app, store)
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected OK, got %d", resp.StatusCode)
+	}
+}
+
+func TestDebugLogsAreAbsentWhenDisabled(t *testing.T) {
+	app := fiber.New()
+	setupDiagnosticsEndpoints(app, nil)
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected not found, got %d", resp.StatusCode)
+	}
+}
+
 func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
 	store := openDiagnosticsTestStore(t)
 

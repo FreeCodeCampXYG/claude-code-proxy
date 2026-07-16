@@ -13,7 +13,7 @@ import (
 	"strconv"
 )
 
-const healthURL = "http://localhost:8082/health"
+const defaultPort = "8082"
 
 var pidFile = defaultPIDFile()
 
@@ -25,23 +25,41 @@ func defaultPIDFile() string {
 	return filepath.Join(cacheDir, "claude-code-proxy", "claude-code-proxy.pid")
 }
 
-// IsRunning checks if the proxy daemon is running
+// IsRunning checks if the default proxy daemon is running.
 func IsRunning() bool {
-	// Try health check first
-	resp, err := http.Get(healthURL)
+	return IsRunningAt("0.0.0.0", defaultPort)
+}
+
+// IsRunningAt checks if the proxy daemon is running on the configured host and port.
+func IsRunningAt(host, port string) bool {
+	resp, err := http.Get(healthURL(host, port))
 	if err == nil {
 		_ = resp.Body.Close()
-		return resp.StatusCode == 200
+		return resp.StatusCode == http.StatusOK
 	}
 
-	// Fallback: check PID file
 	return isProcessRunning()
 }
 
-// Start daemonizes the current process
+func healthURL(host, port string) string {
+	if port == "" {
+		port = defaultPort
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return "http://" + host + ":" + port + "/health"
+}
+
+// Start records the current proxy process after confirming no default instance is running.
 func Start() error {
-	// Already running check
-	if IsRunning() {
+	return StartAt("0.0.0.0", defaultPort)
+}
+
+// StartAt records the current proxy process after confirming no configured instance is running.
+func StartAt(host, port string) error {
+	if IsRunningAt(host, port) {
 		return fmt.Errorf("proxy is already running")
 	}
 
@@ -57,9 +75,14 @@ func Start() error {
 	return nil
 }
 
-// Stop stops the running daemon
+// Stop stops the default proxy daemon.
 func Stop() {
-	if !IsRunning() {
+	StopAt("0.0.0.0", defaultPort)
+}
+
+// StopAt stops the configured proxy daemon.
+func StopAt(host, port string) {
+	if !IsRunningAt(host, port) {
 		fmt.Println("Proxy is not running")
 		return
 	}
@@ -79,12 +102,17 @@ func Stop() {
 	fmt.Println("✅ Proxy stopped")
 }
 
-// Status prints the current daemon status
+// Status prints the default daemon status.
 func Status() {
-	if IsRunning() {
+	StatusAt("0.0.0.0", defaultPort)
+}
+
+// StatusAt prints the current daemon status for the configured host and port.
+func StatusAt(host, port string) {
+	if IsRunningAt(host, port) {
 		pid, _ := readPID()
 		fmt.Printf("✅ Proxy is running (PID: %d)\n", pid)
-		fmt.Printf("   Health endpoint: %s\n", healthURL)
+		fmt.Printf("   Health endpoint: %s\n", healthURL(host, port))
 	} else {
 		fmt.Println("❌ Proxy is not running")
 	}

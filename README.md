@@ -299,7 +299,7 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 - `DIAGNOSTICS_RETENTION` - Retention as a positive Go duration (default: `72h`; cleanup runs at startup)
 - `DIAGNOSTICS_BUSY_TIMEOUT` - SQLite busy timeout (default: `5s`)
 
-Diagnostics can also be enabled with `-d`/`--debug`. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). The diagnostics routes accept only loopback connections; forwarded headers do not bypass this restriction.
+Diagnostics can also be enabled with `-d`/`--debug`. It takes effect only for a newly started proxy: if one is already running, run `claude-code-proxy stop` first, then restart it with `-d`. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). Check `/health` for `"diagnostics_enabled": true`; the diagnostics routes accept only loopback connections, and forwarded headers do not bypass this restriction.
 
 Captured request and response data is redacted before storage. Secrets and conversational content are replaced with type, length, and SHA-256 metadata; oversized or malformed bodies are stored only as bounded metadata, and successful streams store summaries rather than raw chunks. Operational fields such as model, provider, status, timing, token counts, roles, tool names, request structure, and redaction hashes remain visible. Redaction is key-based, and the local SQLite database is not encrypted, so protect the database and any exported NDJSON as sensitive diagnostic data.
 
@@ -347,7 +347,8 @@ The proxy fully supports all Claude Code features:
   - Thinking blocks are properly formatted and hidden in Claude Code UI
   - Shows "Thought for Xs" indicator instead of full content
   - Can be revealed with Ctrl+O in Claude Code
-  - Supports signature_delta events for authentication
+  - For upstreams that provide reasoning text, it is converted to Claude thinking blocks
+  - Compatible provider signatures are forwarded when supplied; the proxy never fabricates signatures
 
 - **Streaming** - Real-time streaming responses
   - Proper SSE (Server-Sent Events) formatting

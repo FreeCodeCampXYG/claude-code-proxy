@@ -29,15 +29,16 @@ func main() {
 		}
 
 		// Handle commands
+		host, port := daemonSettings()
 		switch command {
 		case "stop":
-			daemon.Stop()
+			daemon.StopAt(host, port)
 			return
 		case "status":
-			daemon.Status()
+			daemon.StatusAt(host, port)
 			return
 		case "version":
-			fmt.Println("claude-code-proxy v1.0.0")
+			fmt.Println("claude-code-proxy " + server.ProxyVersion)
 			return
 		case "help", "-h", "--help":
 			printHelp()
@@ -66,13 +67,17 @@ func main() {
 	}
 
 	// Check if already running
-	if daemon.IsRunning() {
-		fmt.Println("Proxy is already running")
-		os.Exit(0)
+	if daemon.IsRunningAt(cfg.Host, cfg.Port) {
+		if debug {
+			fmt.Printf("Proxy is already running; diagnostics cannot be enabled on the existing process. Run %s stop, then restart with -d.\n", os.Args[0])
+		} else {
+			fmt.Println("Proxy is already running")
+		}
+		return
 	}
 
-	// Daemonize (run in background)
-	if err := daemon.Start(); err != nil {
+	// Record this process for status and stop commands.
+	if err := daemon.StartAt(cfg.Host, cfg.Port); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
 		os.Exit(1)
 	}
@@ -84,6 +89,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func daemonSettings() (string, string) {
+	if cfg, err := config.Load(); err == nil {
+		return cfg.Host, cfg.Port
+	}
+
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8082"
+	}
+	return host, port
 }
 
 func printHelp() {

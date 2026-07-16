@@ -92,7 +92,7 @@ func TestChatCompletionsURL(t *testing.T) {
 func TestDiagnosticsConfig(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
-	t.Setenv("DIAGNOSTICS_ENABLED", "true")
+	t.Setenv("DIAGNOSTICS_ENABLED", " TRUE ")
 	t.Setenv("DIAGNOSTICS_DB_PATH", filepath.Join(t.TempDir(), "diagnostics.db"))
 	t.Setenv("DIAGNOSTICS_RETENTION", "48h")
 	t.Setenv("DIAGNOSTICS_BUSY_TIMEOUT", "2500ms")
@@ -349,6 +349,9 @@ func TestLoadWithDebug(t *testing.T) {
 
 	if !cfg.Debug {
 		t.Errorf("Expected Debug=true, got %v", cfg.Debug)
+	}
+	if !cfg.DiagnosticsEnabled || cfg.DiagnosticsDBPath == "" {
+		t.Fatalf("debug mode should enable diagnostics with a database path: %#v", cfg)
 	}
 
 	if cfg.OpenAIAPIKey != "test-key" {

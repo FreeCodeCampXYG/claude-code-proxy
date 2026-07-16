@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **修改前必读：**先通读 [DEVELOPMENT_CONTEXT.md](DEVELOPMENT_CONTEXT.md)。它记录当前已确认的 Windows、NewAPI、推理强度、诊断隐私与发布约束；旧说明或历史计划与其冲突时，以该文档和当前代码/测试为准。
+
 ## Project Overview
 
 Claude Code Proxy is an HTTP proxy that translates Claude API requests to OpenAI-compatible format, enabling Claude Code to work with 200+ alternative models through OpenRouter, OpenAI Direct (o1/o3), and Ollama (local). The proxy runs as a daemon, performs bidirectional API format conversion, and maintains full Claude Code feature compatibility including tool calling, extended thinking blocks, and streaming.

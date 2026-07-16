@@ -342,7 +342,8 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 					"type":  "content_block_start",
 					"index": thinkingBlockIndex,
 					"content_block": map[string]interface{}{
-						"type": "thinking",
+						"type":     "thinking",
+						"thinking": "",
 					},
 				})
 				thinkingBlockStarted = true
@@ -354,8 +355,8 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 				"type":  "content_block_delta",
 				"index": thinkingBlockIndex,
 				"delta": map[string]interface{}{
-					"type": "thinking_delta",
-					"text": reasoningContent,
+					"type":     "thinking_delta",
+					"thinking": reasoningContent,
 				},
 			})
 		}
@@ -409,6 +410,16 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 								},
 							})
 							thinkingBlockHasContent = true
+							if signature, ok := detail["signature"].(string); ok && signature != "" {
+								writeSSEEvent(w, "content_block_delta", map[string]interface{}{
+									"type":  "content_block_delta",
+									"index": thinkingBlockIndex,
+									"delta": map[string]interface{}{
+										"type":      "signature_delta",
+										"signature": signature,
+									},
+								})
+							}
 							_ = w.Flush()
 						}
 					}

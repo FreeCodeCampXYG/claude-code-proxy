@@ -381,6 +381,35 @@ func convertTools(claudeTools []models.Tool) []models.OpenAITool {
 	return openaiTools
 }
 
+// thinkingBlocks extracts visible provider reasoning into Claude thinking blocks.
+// Only upstream-provided signatures are forwarded; this proxy never fabricates them.
+func thinkingBlocks(message models.OpenAIMessage) []models.ContentBlock {
+	var blocks []models.ContentBlock
+	if message.ReasoningContent != "" {
+		blocks = append(blocks, models.ContentBlock{
+			Type:     "thinking",
+			Thinking: message.ReasoningContent,
+		})
+	}
+	for _, reasoningDetail := range message.ReasoningDetails {
+		detailMap, ok := reasoningDetail.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		thinkingText := extractReasoningText(detailMap)
+		if thinkingText == "" {
+			continue
+		}
+		signature, _ := detailMap["signature"].(string)
+		blocks = append(blocks, models.ContentBlock{
+			Type:      "thinking",
+			Thinking:  thinkingText,
+			Signature: signature,
+		})
+	}
+	return blocks
+}
+
 // ConvertResponse converts an OpenAI response to Claude format
 func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (*models.ClaudeResponse, error) {
 	if len(openaiResp.Choices) == 0 {
@@ -389,24 +418,8 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 
 	choice := openaiResp.Choices[0]
 
-	// Convert content to Claude format
-	var contentBlocks []models.ContentBlock
-
-	// Handle reasoning_details (convert to thinking blocks)
-	// This must come BEFORE other content blocks
-	if len(choice.Message.ReasoningDetails) > 0 {
-		for _, reasoningDetail := range choice.Message.ReasoningDetails {
-			if detailMap, ok := reasoningDetail.(map[string]interface{}); ok {
-				thinkingText := extractReasoningText(detailMap)
-				if thinkingText != "" {
-					contentBlocks = append(contentBlocks, models.ContentBlock{
-						Type:     "thinking",
-						Thinking: thinkingText, // Use Thinking field, not Text
-					})
-				}
-			}
-		}
-	}
+	// Thinking blocks must precede normal text and tool blocks.
+	contentBlocks := thinkingBlocks(choice.Message)
 
 	// Handle text content
 	if choice.Message.Content != nil {

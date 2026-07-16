@@ -14,6 +14,15 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestHealthURLUsesConfiguredPortAndLoopback(t *testing.T) {
+	if got := healthURL("0.0.0.0", "18082"); got != "http://127.0.0.1:18082/health" {
+		t.Fatalf("healthURL() = %q", got)
+	}
+	if got := healthURL("127.0.0.1", "18083"); got != "http://127.0.0.1:18083/health" {
+		t.Fatalf("healthURL() = %q", got)
+	}
+}
+
 // TestWriteAndReadPID tests PID file write and read operations
 func TestWriteAndReadPID(t *testing.T) {
 	// Clean up any existing PID file first

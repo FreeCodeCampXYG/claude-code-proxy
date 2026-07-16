@@ -211,10 +211,11 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 func getEnvAsBoolOrDefault(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		return value == "true" || value == "1" || value == "yes"
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return defaultValue
 	}
-	return defaultValue
+	return value == "true" || value == "1" || value == "yes"
 }
 
 func getEnvAsDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
