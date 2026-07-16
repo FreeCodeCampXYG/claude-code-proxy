@@ -53,7 +53,9 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	setupClaudeEndpoints(app, cfg, store)
 
 	body := `{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"user secret"}]}`
-	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +96,9 @@ func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
 	setupClaudeEndpoints(app, cfg, store)
 
 	raw := `{"messages":["private malformed content"`
-	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(raw)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(raw))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}

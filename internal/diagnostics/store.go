@@ -106,7 +106,7 @@ func Open(path string, options StoreOptions) (*Store, error) {
 	if store.now == nil {
 		store.now = time.Now
 	}
-	if err := store.initialize(context.Background(), busyTimeout); err != nil {
+	if err := store.initialize(context.Background(), busyTimeout, path != ":memory:"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -119,21 +119,23 @@ func sqliteDSN(path string, busyTimeout time.Duration) string {
 		milliseconds = 1
 	}
 	if path == ":memory:" {
-		return fmt.Sprintf("file:diagnostics?mode=memory&cache=shared&_pragma=busy_timeout%%28%d%%29&_pragma=journal_mode%%28WAL%%29", milliseconds)
+		return fmt.Sprintf("file:diagnostics?mode=memory&cache=shared&_pragma=busy_timeout%%28%d%%29", milliseconds)
 	}
 	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	return fileURL.String() + fmt.Sprintf("?_pragma=busy_timeout%%28%d%%29&_pragma=journal_mode%%28WAL%%29", milliseconds)
 }
 
-func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration) error {
+func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, enableWAL bool) error {
 	if err := store.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping diagnostics database: %w", err)
 	}
 	if _, err := store.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds())); err != nil {
 		return fmt.Errorf("set diagnostics busy timeout: %w", err)
 	}
-	if _, err := store.db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
-		return fmt.Errorf("enable diagnostics WAL mode: %w", err)
+	if enableWAL {
+		if _, err := store.db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
+			return fmt.Errorf("enable diagnostics WAL mode: %w", err)
+		}
 	}
 	if _, err := store.db.ExecContext(ctx, createSchemaSQL); err != nil {
 		return fmt.Errorf("create diagnostics schema: %w", err)
