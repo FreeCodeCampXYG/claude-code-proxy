@@ -1,0 +1,15 @@
+# golangci-lint v2 configuration
+version: "2"
+
+run:
+  timeout: 5m
+  tests: false  # Don't analyze test files
+
+linters:
+  default: none  # Start with no linters, only enable specific ones
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused

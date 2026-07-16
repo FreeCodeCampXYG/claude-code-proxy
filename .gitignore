@@ -1,0 +1,45 @@
+# Binaries (built artifacts, not source)
+# Note: Keep cmd/ directory tracked (source code)
+# Note: Keep scripts/ccp tracked (shell script wrapper)
+claude-code-proxy
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+
+# Build artifacts
+dist/
+
+# Environment files
+.env
+*.env
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Session and log files
+session.jsonl
+*.log
+
+# Daemon files
+*.pid
