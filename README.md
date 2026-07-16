@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/github/license/nielspeter/claude-code-proxy)](LICENSE)
 [![GitHub issues](https://img.shields.io/github/issues/nielspeter/claude-code-proxy)](https://github.com/nielspeter/claude-code-proxy/issues)
 
-A lightweight HTTP proxy that enables Claude Code to work with OpenAI-compatible API providers including OpenRouter (200+ models), OpenAI Direct (GPT-5 reasoning), and Ollama (free local inference).
+A lightweight HTTP proxy that enables Claude Code to work with OpenAI-compatible API providers including OpenRouter (200+ models), OpenAI Direct (GPT-5 reasoning), self-hosted NewAPI, and Ollama (free local inference).
 
 > **⚠️ Early Stage / Beta Software**
 >
@@ -21,9 +21,10 @@ A lightweight HTTP proxy that enables Claude Code to work with OpenAI-compatible
   - Extended thinking blocks with proper hiding/showing
   - Streaming responses with real-time token tracking
   - Proper SSE event formatting
-- ✅ **Multiple Provider Support** - OpenRouter, OpenAI Direct, and Ollama
+- ✅ **Multiple Provider Support** - OpenRouter, OpenAI Direct, self-hosted NewAPI, and Ollama
   - **OpenRouter**: 200+ models (GPT, Grok, Gemini, etc.) through single API
   - **OpenAI Direct**: Native GPT-5 reasoning model support
+  - **NewAPI**: Self-hosted OpenAI-compatible gateway with Claude effort mapping
   - **Ollama**: Free local inference with DeepSeek-R1, Llama3, Qwen, etc.
 - ✅ **Adaptive Per-Model Detection** - Zero-config provider compatibility
   - Automatically learns which parameters each model supports
@@ -53,6 +54,10 @@ make build
 
 ### Install
 
+**Windows release (no Go required)**
+
+Download `claude-code-proxy-windows-amd64.exe` from the [latest release](https://github.com/nielspeter/claude-code-proxy/releases/latest), place it on your `PATH`, and run it directly. The release EXE is self-contained; Go is required only when building from source.
+
 **Option 1: System-wide installation (recommended)**
 
 ```bash
@@ -79,7 +84,7 @@ After installation, `claude-code-proxy` and `ccp` will be available system-wide.
 
 ### Configuration
 
-The proxy supports three provider types. Choose the one that fits your needs:
+The proxy supports four provider types. Choose the one that fits your needs:
 
 **Option 1: OpenRouter (Recommended)**
 ```bash
@@ -112,7 +117,35 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5  # Reasoning model
 EOF
 ```
 
-**Option 3: Ollama (Local)**
+**Option 3: Self-hosted NewAPI**
+```bash
+mkdir -p ~/.claude
+cat > ~/.claude/proxy.env << 'EOF'
+OPENAI_BASE_URL=http://127.0.0.1:3000/v1
+OPENAI_PROVIDER=newapi
+OPENAI_API_KEY=your-newapi-key
+
+# Map Claude tiers to model IDs exposed by your NewAPI instance
+ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6
+ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6
+ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6
+EOF
+```
+
+Set `OPENAI_PROVIDER=newapi` explicitly: localhost URLs would otherwise be auto-detected as Ollama, while custom domains would be treated as generic providers. The proxy maps Claude `output_config.effort` to NewAPI `reasoning_effort` as follows:
+
+| Claude effort | NewAPI `reasoning_effort` |
+|---------------|---------------------------|
+| `light` | `light` |
+| `low` | `low` |
+| `medium` | `medium` |
+| `high` | `high` |
+| `xhigh` | `xhigh` |
+| `max` | `max` |
+
+The proxy preserves any non-empty explicit effort value instead of deriving it from the Claude model tier or restricting it to a fixed list. It trims whitespace and normalizes casing before forwarding. If Claude Code does not send `output_config.effort`, the proxy omits `reasoning_effort` and lets NewAPI/GPT use its configured default. `thinking.budget_tokens` is not converted into an effort level.
+
+**Option 4: Ollama (Local)**
 ```bash
 mkdir -p ~/.claude
 cat > ~/.claude/proxy.env << 'EOF'
@@ -127,16 +160,16 @@ EOF
 
 ## Provider Comparison
 
-| Feature | OpenRouter | OpenAI Direct | Ollama |
-|---------|-----------|---------------|--------|
-| **Cost** | Pay-per-use | Pay-per-use | Free |
-| **Setup** | Easy | Easy | Requires local install |
-| **Models** | 200+ | OpenAI only | Open source only |
-| **Reasoning** | Yes (via GPT/Grok/etc) | Yes (GPT-5) | Yes (DeepSeek-R1) |
-| **Tool Calling** | Yes | Yes | Model dependent |
-| **Privacy** | Cloud | Cloud | 100% local |
-| **Speed** | Fast | Fast | Very fast (local) |
-| **API Key** | Required | Required | Not needed |
+| Feature | OpenRouter | OpenAI Direct | NewAPI | Ollama |
+|---------|-----------|---------------|--------|--------|
+| **Cost** | Pay-per-use | Pay-per-use | Deployment dependent | Free |
+| **Setup** | Easy | Easy | Self-hosted | Requires local install |
+| **Models** | 200+ | OpenAI only | Instance dependent | Open source only |
+| **Reasoning** | Yes (via GPT/Grok/etc) | Yes (GPT-5) | Yes (effort mapping) | Yes (DeepSeek-R1) |
+| **Tool Calling** | Yes | Yes | Model dependent | Model dependent |
+| **Privacy** | Cloud | Cloud | Self-hosted | 100% local |
+| **Speed** | Fast | Fast | Deployment dependent | Very fast (local) |
+| **API Key** | Required | Required | Deployment dependent | Not needed |
 
 ### Run
 
@@ -153,14 +186,14 @@ EOF
 **Flags:**
 
 ```bash
--d, --debug     # Enable debug mode (full request/response logging)
+-d, --debug     # Enable local redacted diagnostics (SQLite + /debug/logs)
 -s, --simple    # Enable simple log mode (one-line summaries)
 ```
 
 **Examples:**
 
 ```bash
-# Start with debug logging
+# Start with redacted SQLite diagnostics and metadata-level debug logging
 ./claude-code-proxy -d
 
 # Start with simple one-line summaries
@@ -227,6 +260,7 @@ make build-all
 # dist/claude-code-proxy-darwin-arm64
 # dist/claude-code-proxy-linux-amd64
 # dist/claude-code-proxy-linux-arm64
+# dist/claude-code-proxy-windows-amd64.exe
 ```
 
 ## Configuration Reference
@@ -237,8 +271,11 @@ make build-all
 **Optional - API Configuration:**
 - `OPENAI_BASE_URL` - API base URL (default: `https://api.openai.com/v1`)
   - For OpenRouter: `https://openrouter.ai/api/v1`
+  - For NewAPI: Your self-hosted OpenAI-compatible `/v1` endpoint
   - For Ollama: `http://localhost:11434/v1`
   - For other providers: Use their OpenAI-compatible endpoint
+- `OPENAI_PROVIDER` - Optional explicit provider selection: `openrouter`, `openai`, `ollama`, `newapi`, or `generic`
+  - Set `newapi` for a self-hosted NewAPI deployment to enable its reasoning-effort mapping
 
 **Optional - Model Routing:**
 - `ANTHROPIC_DEFAULT_OPUS_MODEL` - Override opus routing (default: `gpt-5`)
@@ -255,6 +292,16 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 **Optional - OpenRouter Specific:**
 - `OPENROUTER_APP_NAME` - App name for OpenRouter dashboard tracking
 - `OPENROUTER_APP_URL` - App URL for better rate limits (higher quotas)
+
+**Optional - Diagnostics:**
+- `DIAGNOSTICS_ENABLED` - Enable local redacted SQLite diagnostics (`true`, `1`, or `yes`; default: `false`)
+- `DIAGNOSTICS_DB_PATH` - Override the SQLite database path
+- `DIAGNOSTICS_RETENTION` - Retention as a positive Go duration (default: `72h`; cleanup runs at startup)
+- `DIAGNOSTICS_BUSY_TIMEOUT` - SQLite busy timeout (default: `5s`)
+
+Diagnostics can also be enabled with `-d`/`--debug`. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). The diagnostics routes accept only loopback connections; forwarded headers do not bypass this restriction.
+
+Captured request and response data is redacted before storage. Secrets and conversational content are replaced with type, length, and SHA-256 metadata; oversized or malformed bodies are stored only as bounded metadata, and successful streams store summaries rather than raw chunks. Operational fields such as model, provider, status, timing, token counts, roles, tool names, request structure, and redaction hashes remain visible. Redaction is key-based, and the local SQLite database is not encrypted, so protect the database and any exported NDJSON as sensitive diagnostic data.
 
 **Optional - Security:**
 - `ANTHROPIC_API_KEY` - Client API key validation (optional)
@@ -457,18 +504,20 @@ When using OpenWebUI (which has a quirk with `max_completion_tokens`):
 
 **No configuration needed** - the proxy learns and adapts automatically.
 
-### Debug Logging
+### Debug Logging and Diagnostics
 
-Enable debug mode to see cache activity:
+Enable debug mode to see capability-cache activity and other operational metadata while recording redacted request diagnostics in SQLite:
 
 ```bash
 ./claude-code-proxy -d -s
 
-# Logs show:
+# Logs show metadata such as:
 # [DEBUG] Cache MISS: gpt-5 → will auto-detect (try max_completion_tokens)
 # [DEBUG] Cached: model gpt-5 supports max_completion_tokens
 # [DEBUG] Cache HIT: gpt-5 → max_completion_tokens=true
 ```
+
+`-d` does not print full request and response bodies. It enables the local diagnostics database and the loopback-only viewer at `http://127.0.0.1:8082/debug/logs`. To enable diagnostics without verbose console debug messages, set `DIAGNOSTICS_ENABLED=true`. Records are retained for `72h` by default; override this with `DIAGNOSTICS_RETENTION` and override the database location with `DIAGNOSTICS_DB_PATH`.
 
 ## License
 

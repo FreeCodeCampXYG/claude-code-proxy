@@ -9,14 +9,21 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
-	"syscall"
 )
 
-const (
-	pidFile   = "/tmp/claude-code-proxy.pid"
-	healthURL = "http://localhost:8082/health"
-)
+const healthURL = "http://localhost:8082/health"
+
+var pidFile = defaultPIDFile()
+
+func defaultPIDFile() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	return filepath.Join(cacheDir, "claude-code-proxy", "claude-code-proxy.pid")
+}
 
 // IsRunning checks if the proxy daemon is running
 func IsRunning() bool {
@@ -63,13 +70,7 @@ func Stop() {
 		return
 	}
 
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding process: %v\n", err)
-		return
-	}
-
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := terminateProcess(pid); err != nil {
 		fmt.Fprintf(os.Stderr, "Error stopping process: %v\n", err)
 		return
 	}
@@ -92,6 +93,9 @@ func Status() {
 // Helper functions
 
 func writePID() error {
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0700); err != nil {
+		return err
+	}
 	pid := os.Getpid()
 	return os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0644)
 }
@@ -113,15 +117,7 @@ func isProcessRunning() bool {
 	if err != nil {
 		return false
 	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// Send signal 0 to check if process exists
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return processExists(pid)
 }
 
 // Cleanup should be called on shutdown

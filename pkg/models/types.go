@@ -19,15 +19,26 @@ type ContentBlock struct {
 
 // ClaudeRequest represents the full Claude API request
 type ClaudeRequest struct {
-	Model         string          `json:"model"`
-	Messages      []ClaudeMessage `json:"messages"`
-	MaxTokens     int             `json:"max_tokens"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	TopP          *float64        `json:"top_p,omitempty"`
-	StopSequences []string        `json:"stop_sequences,omitempty"`
-	Stream        *bool           `json:"stream,omitempty"`
-	System        interface{}     `json:"system,omitempty"` // Can be string OR array of content blocks
-	Tools         []Tool          `json:"tools,omitempty"`
+	Model         string              `json:"model"`
+	Messages      []ClaudeMessage     `json:"messages"`
+	MaxTokens     int                 `json:"max_tokens"`
+	Temperature   *float64            `json:"temperature,omitempty"`
+	TopP          *float64            `json:"top_p,omitempty"`
+	StopSequences []string            `json:"stop_sequences,omitempty"`
+	Stream        *bool               `json:"stream,omitempty"`
+	System        interface{}         `json:"system,omitempty"` // Can be string OR array of content blocks
+	Tools         []Tool              `json:"tools,omitempty"`
+	OutputConfig  *ClaudeOutputConfig `json:"output_config,omitempty"`
+	Thinking      *ClaudeThinking     `json:"thinking,omitempty"`
+}
+
+type ClaudeOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+type ClaudeThinking struct {
+	Type         string `json:"type,omitempty"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 // Tool represents a function/tool definition

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestProviderDetection tests that we correctly identify providers from OPENAI_BASE_URL
@@ -57,6 +58,66 @@ func TestProviderDetection(t *testing.T) {
 					tt.baseURL, provider, tt.expectedProvider)
 			}
 		})
+	}
+}
+
+func TestProviderOverride(t *testing.T) {
+	for _, provider := range []ProviderType{ProviderOpenRouter, ProviderOpenAI, ProviderOllama, ProviderNewAPI, ProviderGeneric} {
+		t.Run(string(provider), func(t *testing.T) {
+			cfg := &Config{OpenAIBaseURL: "https://custom.example.com/v1", OpenAIProvider: provider}
+			if got := cfg.DetectProvider(); got != provider {
+				t.Fatalf("DetectProvider() = %q, want %q", got, provider)
+			}
+		})
+	}
+}
+
+func TestChatCompletionsURL(t *testing.T) {
+	tests := []struct {
+		baseURL string
+		want    string
+	}{
+		{"https://api.example.com/v1", "https://api.example.com/v1/chat/completions"},
+		{"https://api.example.com/v1/", "https://api.example.com/v1/chat/completions"},
+		{"https://api.example.com/v1/chat/completions", "https://api.example.com/v1/chat/completions"},
+	}
+	for _, tt := range tests {
+		cfg := &Config{OpenAIBaseURL: tt.baseURL}
+		if got := cfg.ChatCompletionsURL(); got != tt.want {
+			t.Errorf("ChatCompletionsURL() = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestDiagnosticsConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("DIAGNOSTICS_ENABLED", "true")
+	t.Setenv("DIAGNOSTICS_DB_PATH", filepath.Join(t.TempDir(), "diagnostics.db"))
+	t.Setenv("DIAGNOSTICS_RETENTION", "48h")
+	t.Setenv("DIAGNOSTICS_BUSY_TIMEOUT", "2500ms")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.DiagnosticsEnabled || cfg.DiagnosticsRetention != 48*time.Hour || cfg.DiagnosticsBusyTimeout != 2500*time.Millisecond {
+		t.Fatalf("unexpected diagnostics config: %#v", cfg)
+	}
+}
+
+func TestInvalidConfigOverrides(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("OPENAI_PROVIDER", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected invalid provider error")
+	}
+
+	t.Setenv("OPENAI_PROVIDER", "generic")
+	t.Setenv("DIAGNOSTICS_RETENTION", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected invalid diagnostics retention error")
 	}
 }
 

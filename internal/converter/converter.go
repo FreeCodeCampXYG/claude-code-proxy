@@ -102,9 +102,8 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	// Enable usage tracking and reasoning - provider-specific
+	provider := cfg.DetectProvider()
 	if claudeReq.Stream != nil && *claudeReq.Stream {
-		provider := cfg.DetectProvider()
-
 		switch provider {
 		case config.ProviderOpenRouter:
 			// OpenRouter needs reasoning blocks and usage tracking enabled
@@ -128,6 +127,11 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 			}
 			openaiReq.ReasoningEffort = "medium" // minimal | low | medium | high
 
+		case config.ProviderNewAPI:
+			openaiReq.StreamOptions = map[string]interface{}{
+				"include_usage": true,
+			}
+
 		case config.ProviderOllama:
 			// Ollama needs explicit tool_choice when tools are present
 			// Without this, Ollama models may not naturally choose to use tools
@@ -135,6 +139,10 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 				openaiReq.ToolChoice = "required"
 			}
 		}
+	}
+
+	if provider == config.ProviderNewAPI {
+		openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
 	}
 
 	// Set token limit using adaptive per-model detection
@@ -162,6 +170,14 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	return openaiReq, nil
+}
+
+func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
+	if claudeReq.OutputConfig == nil {
+		return ""
+	}
+
+	return strings.ToLower(strings.TrimSpace(claudeReq.OutputConfig.Effort))
 }
 
 // mapModel maps Claude model names to provider-specific models using pattern matching.

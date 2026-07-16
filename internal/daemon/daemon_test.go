@@ -2,8 +2,17 @@ package daemon
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	pidFile = filepath.Join(os.TempDir(), "claude-code-proxy-daemon-test", "claude-code-proxy.pid")
+	_ = os.RemoveAll(filepath.Dir(pidFile))
+	code := m.Run()
+	_ = os.RemoveAll(filepath.Dir(pidFile))
+	os.Exit(code)
+}
 
 // TestWriteAndReadPID tests PID file write and read operations
 func TestWriteAndReadPID(t *testing.T) {

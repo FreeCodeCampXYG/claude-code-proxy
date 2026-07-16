@@ -23,7 +23,14 @@ const (
 	ProviderOpenRouter ProviderType = "openrouter"
 	ProviderOpenAI     ProviderType = "openai"
 	ProviderOllama     ProviderType = "ollama"
+	ProviderNewAPI     ProviderType = "newapi"
+	ProviderGeneric    ProviderType = "generic"
 	ProviderUnknown    ProviderType = "unknown"
+)
+
+const (
+	DefaultDiagnosticsRetention   = 72 * time.Hour
+	DefaultDiagnosticsBusyTimeout = 5 * time.Second
 )
 
 // CacheKey uniquely identifies a (provider, model) combination for capability caching
@@ -54,7 +61,14 @@ type Config struct {
 
 	// Optional
 	OpenAIBaseURL   string
+	OpenAIProvider  ProviderType
 	AnthropicAPIKey string
+
+	// Diagnostics storage
+	DiagnosticsEnabled     bool
+	DiagnosticsDBPath      string
+	DiagnosticsRetention   time.Duration
+	DiagnosticsBusyTimeout time.Duration
 
 	// Model routing (pattern-based if not set)
 	OpusModel   string
@@ -83,10 +97,12 @@ type Config struct {
 // Tries multiple locations: ./.env, ~/.claude/proxy.env, ~/.claude-code-proxy
 func Load() (*Config, error) {
 	// Try loading .env files in priority order
-	locations := []string{
-		".env",
-		filepath.Join(os.Getenv("HOME"), ".claude", "proxy.env"),
-		filepath.Join(os.Getenv("HOME"), ".claude-code-proxy"),
+	locations := []string{".env"}
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		locations = append(locations,
+			filepath.Join(homeDir, ".claude", "proxy.env"),
+			filepath.Join(homeDir, ".claude-code-proxy"),
+		)
 	}
 
 	for _, loc := range locations {
@@ -102,8 +118,15 @@ func Load() (*Config, error) {
 	// Build config from environment
 	cfg := &Config{
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
-		OpenAIBaseURL:   getEnvOrDefault("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+		OpenAIBaseURL:   strings.TrimRight(getEnvOrDefault("OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
+		OpenAIProvider:  ProviderType(strings.ToLower(strings.TrimSpace(os.Getenv("OPENAI_PROVIDER")))),
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
+
+		// Diagnostics storage
+		DiagnosticsEnabled:     getEnvAsBoolOrDefault("DIAGNOSTICS_ENABLED", false),
+		DiagnosticsDBPath:      os.Getenv("DIAGNOSTICS_DB_PATH"),
+		DiagnosticsRetention:   getEnvAsDurationOrDefault("DIAGNOSTICS_RETENTION", DefaultDiagnosticsRetention),
+		DiagnosticsBusyTimeout: getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
 
 		// Pattern-based routing (optional overrides)
 		OpusModel:   os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"),
@@ -120,6 +143,28 @@ func Load() (*Config, error) {
 		// OpenRouter-specific (optional)
 		OpenRouterAppName: os.Getenv("OPENROUTER_APP_NAME"),
 		OpenRouterAppURL:  os.Getenv("OPENROUTER_APP_URL"),
+	}
+
+	if cfg.OpenAIBaseURL == "" {
+		return nil, fmt.Errorf("OPENAI_BASE_URL must not be empty")
+	}
+	if cfg.OpenAIProvider != "" && !isValidProvider(cfg.OpenAIProvider) {
+		return nil, fmt.Errorf("OPENAI_PROVIDER must be one of openrouter, openai, ollama, newapi, generic")
+	}
+	if cfg.DiagnosticsRetention <= 0 {
+		return nil, fmt.Errorf("DIAGNOSTICS_RETENTION must be a positive Go duration")
+	}
+	if cfg.DiagnosticsBusyTimeout <= 0 {
+		return nil, fmt.Errorf("DIAGNOSTICS_BUSY_TIMEOUT must be a positive Go duration")
+	}
+	if cfg.DiagnosticsEnabled && strings.TrimSpace(cfg.DiagnosticsDBPath) == "" {
+		if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" {
+			cfg.DiagnosticsDBPath = filepath.Join(cacheDir, "claude-code-proxy", "diagnostics.db")
+		} else if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+			cfg.DiagnosticsDBPath = filepath.Join(homeDir, ".claude", "proxy-diagnostics.db")
+		} else {
+			return nil, fmt.Errorf("DIAGNOSTICS_DB_PATH is required when diagnostics are enabled and no user directory is available")
+		}
 	}
 
 	// Validate required fields
@@ -143,6 +188,18 @@ func LoadWithDebug(debug bool) (*Config, error) {
 		return nil, err
 	}
 	cfg.Debug = debug
+	if debug {
+		cfg.DiagnosticsEnabled = true
+		if strings.TrimSpace(cfg.DiagnosticsDBPath) == "" {
+			if cacheDir, cacheErr := os.UserCacheDir(); cacheErr == nil && cacheDir != "" {
+				cfg.DiagnosticsDBPath = filepath.Join(cacheDir, "claude-code-proxy", "diagnostics.db")
+			} else if homeDir, homeErr := os.UserHomeDir(); homeErr == nil && homeDir != "" {
+				cfg.DiagnosticsDBPath = filepath.Join(homeDir, ".claude", "proxy-diagnostics.db")
+			} else {
+				return nil, fmt.Errorf("DIAGNOSTICS_DB_PATH is required when debug diagnostics are enabled")
+			}
+		}
+	}
 	return cfg, nil
 }
 
@@ -160,8 +217,25 @@ func getEnvAsBoolOrDefault(key string, defaultValue bool) bool {
 	return defaultValue
 }
 
-// DetectProvider identifies the provider type based on base URL
+func getEnvAsDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return defaultValue
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0
+	}
+	return duration
+}
+
+// DetectProvider identifies the provider type using OPENAI_PROVIDER when set,
+// otherwise falling back to base URL detection.
 func (c *Config) DetectProvider() ProviderType {
+	if c.OpenAIProvider != "" {
+		return c.OpenAIProvider
+	}
+
 	baseURL := strings.ToLower(c.OpenAIBaseURL)
 
 	if strings.Contains(baseURL, "openrouter.ai") {
@@ -174,6 +248,24 @@ func (c *Config) DetectProvider() ProviderType {
 		return ProviderOllama
 	}
 	return ProviderUnknown
+}
+
+func isValidProvider(provider ProviderType) bool {
+	switch provider {
+	case ProviderOpenRouter, ProviderOpenAI, ProviderOllama, ProviderNewAPI, ProviderGeneric:
+		return true
+	default:
+		return false
+	}
+}
+
+// ChatCompletionsURL returns the configured OpenAI-compatible chat completions endpoint.
+func (c *Config) ChatCompletionsURL() string {
+	baseURL := strings.TrimRight(strings.TrimSpace(c.OpenAIBaseURL), "/")
+	if strings.HasSuffix(strings.ToLower(baseURL), "/chat/completions") {
+		return baseURL
+	}
+	return baseURL + "/chat/completions"
 }
 
 // IsLocalhost returns true if the base URL points to localhost

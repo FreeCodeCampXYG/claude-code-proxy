@@ -50,7 +50,7 @@ func main() {
 	var err error
 	if debug {
 		cfg, err = config.LoadWithDebug(true)
-		fmt.Println("🐛 Debug mode enabled - full request/response logging active")
+		fmt.Println("🐛 Diagnostic mode enabled - redacted requests are stored locally")
 	} else {
 		cfg, err = config.Load()
 	}
@@ -97,7 +97,7 @@ Usage:
   claude-code-proxy help                        Show this help
 
 Flags:
-  -d, --debug     Enable debug mode (logs full requests/responses)
+  -d, --debug     Enable local redacted diagnostics (SQLite + /debug/logs)
   -s, --simple    Enable simple log mode (one-line summary per request)
 
 Configuration:
@@ -114,6 +114,10 @@ Configuration:
     ANTHROPIC_DEFAULT_SONNET_MODEL  Override sonnet routing
     ANTHROPIC_DEFAULT_HAIKU_MODEL   Override haiku routing
     OPENAI_BASE_URL                 OpenAI API base URL
+    OPENAI_PROVIDER                 auto/openai/openrouter/ollama/newapi/generic
+    DIAGNOSTICS_ENABLED             Store redacted diagnostics in SQLite
+    DIAGNOSTICS_DB_PATH             Override diagnostics database path
+    DIAGNOSTICS_RETENTION           Retention duration (default: 72h)
     HOST                            Server host (default: 0.0.0.0)
     PORT                            Server port (default: 8082)
 

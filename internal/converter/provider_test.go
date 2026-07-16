@@ -159,6 +159,72 @@ func TestProviderSpecificRequestConversion(t *testing.T) {
 	})
 }
 
+func TestNewAPIReasoningMapping(t *testing.T) {
+	stream := true
+	tests := []struct {
+		name     string
+		model    string
+		effort   string
+		thinking *models.ClaudeThinking
+		want     string
+	}{
+		{name: "low", model: "claude-sonnet-4", effort: "low", want: "low"},
+		{name: "light", model: "claude-sonnet-4", effort: "light", want: "light"},
+		{name: "medium", model: "claude-sonnet-4", effort: "medium", want: "medium"},
+		{name: "high", model: "claude-sonnet-4", effort: "high", want: "high"},
+		{name: "xhigh", model: "claude-sonnet-4", effort: "xhigh", want: "xhigh"},
+		{name: "max", model: "claude-sonnet-4", effort: "max", want: "max"},
+		{name: "haiku without effort", model: "claude-haiku-4", want: ""},
+		{name: "sonnet without effort", model: "claude-sonnet-4", want: ""},
+		{name: "opus without effort", model: "claude-opus-4", want: ""},
+		{name: "thinking budget does not imply effort", model: "claude-opus-4", thinking: &models.ClaudeThinking{Type: "enabled", BudgetTokens: 24000}, want: ""},
+		{name: "future effort is preserved", model: "claude-opus-4", effort: "automatic", want: "automatic"},
+		{name: "effort is normalized", model: "claude-opus-4", effort: "  Extra_High  ", want: "extra_high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var outputConfig *models.ClaudeOutputConfig
+			if tt.effort != "" {
+				outputConfig = &models.ClaudeOutputConfig{Effort: tt.effort}
+			}
+			req, err := ConvertRequest(models.ClaudeRequest{
+				Model:        tt.model,
+				Messages:     []models.ClaudeMessage{{Role: "user", Content: "test"}},
+				Stream:       &stream,
+				OutputConfig: outputConfig,
+				Thinking:     tt.thinking,
+			}, &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI})
+			if err != nil {
+				t.Fatalf("ConvertRequest() error = %v", err)
+			}
+			if req.ReasoningEffort != tt.want {
+				t.Errorf("ReasoningEffort = %q, want %q", req.ReasoningEffort, tt.want)
+			}
+			if req.StreamOptions["include_usage"] != true {
+				t.Errorf("StreamOptions = %#v, want include_usage=true", req.StreamOptions)
+			}
+		})
+	}
+}
+
+func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
+	req, err := ConvertRequest(models.ClaudeRequest{
+		Model:        "claude-opus-4",
+		Messages:     []models.ClaudeMessage{{Role: "user", Content: "test"}},
+		OutputConfig: &models.ClaudeOutputConfig{Effort: "light"},
+	}, &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI})
+	if err != nil {
+		t.Fatalf("ConvertRequest() error = %v", err)
+	}
+	if req.ReasoningEffort != "light" {
+		t.Fatalf("ReasoningEffort = %q, want light", req.ReasoningEffort)
+	}
+	if req.StreamOptions != nil {
+		t.Fatalf("StreamOptions = %#v, want nil for non-streaming request", req.StreamOptions)
+	}
+}
+
 // TestModelMappingVerification tests that we're using the correct model for each provider
 func TestModelMappingVerification(t *testing.T) {
 	tests := []struct {

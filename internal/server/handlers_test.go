@@ -1,12 +1,139 @@
 package server
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
+	"github.com/claude-code-proxy/proxy/internal/diagnostics"
+	"github.com/gofiber/fiber/v2"
 )
 
-// TestServerSetup tests that the server can be initialized
+func TestRequestIDMiddlewareReplacesInboundHeader(t *testing.T) {
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	app.Get("/", func(c *fiber.Ctx) error { return c.SendStatus(fiber.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Request-ID", "attacker-controlled")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := resp.Header.Get("X-Request-ID")
+	if requestID == "" || requestID == "attacker-controlled" {
+		t.Fatalf("expected generated request ID, got %q", requestID)
+	}
+}
+
+func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected upstream path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"provider secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	body := `{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"user secret"}]}`
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status %d: %s", resp.StatusCode, responseBody)
+	}
+
+	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(event.RequestBody), "user secret") {
+		t.Fatalf("request body was not redacted: %s", event.RequestBody)
+	}
+	if strings.Contains(string(event.ResponseBody), "provider secret") {
+		t.Fatalf("response body was not redacted: %s", event.ResponseBody)
+	}
+	var metadata diagnosticsMetadata
+	if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Attempts) != 1 || metadata.Attempts[0].StatusCode != http.StatusOK {
+		t.Fatalf("unexpected attempts: %+v", metadata.Attempts)
+	}
+}
+
+func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
+	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{OpenAIBaseURL: "http://127.0.0.1:1"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	raw := `{"messages":["private malformed content"`
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(event.RequestBody) != 0 || strings.Contains(string(event.Metadata), "private malformed content") {
+		t.Fatalf("malformed raw body leaked: request=%s metadata=%s", event.RequestBody, event.Metadata)
+	}
+	if !strings.Contains(string(event.Metadata), `"malformed":true`) {
+		t.Fatalf("missing malformed metadata: %s", event.Metadata)
+	}
+}
+
+func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
+	store, err := diagnostics.Open(":memory:", diagnostics.StoreOptions{Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	app := fiber.New()
+	setupDiagnosticsEndpoints(app, store)
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs/events", nil)
+	req.RemoteAddr = "203.0.113.7:1234"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("expected forbidden, got %d", resp.StatusCode)
+	}
+}
+
 func TestServerSetup(t *testing.T) {
 	cfg := &config.Config{
 		Host: "127.0.0.1",

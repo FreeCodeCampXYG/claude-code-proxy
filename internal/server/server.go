@@ -8,6 +8,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/claude-code-proxy/proxy/internal/converter"
 	"github.com/claude-code-proxy/proxy/internal/daemon"
+	"github.com/claude-code-proxy/proxy/internal/diagnostics"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -29,6 +31,26 @@ const (
 
 // Start initializes and starts the HTTP server
 func Start(cfg *config.Config) error {
+	var diagnosticsStore *diagnostics.Store
+	if cfg.DiagnosticsEnabled {
+		var err error
+		diagnosticsStore, err = diagnostics.Open(cfg.DiagnosticsDBPath, diagnostics.StoreOptions{
+			Retention: cfg.DiagnosticsRetention,
+			BusyTimeout: cfg.DiagnosticsBusyTimeout,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize diagnostics store: %w", err)
+		}
+		defer func() {
+			if err := diagnosticsStore.Close(); err != nil {
+				fmt.Printf("[WARN] Failed to close diagnostics store: %v\n", err)
+			}
+		}()
+		if _, err := diagnosticsStore.Cleanup(context.Background()); err != nil {
+			fmt.Printf("[WARN] Diagnostics cleanup failed: %v\n", err)
+		}
+	}
+
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		ServerHeader:          "Claude-Code-Proxy",
@@ -37,6 +59,7 @@ func Start(cfg *config.Config) error {
 
 	// Middleware
 	app.Use(recover.New())
+	app.Use(requestIDMiddleware)
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
@@ -80,7 +103,8 @@ func Start(cfg *config.Config) error {
 	})
 
 	// Claude API endpoints
-	setupClaudeEndpoints(app, cfg)
+	setupClaudeEndpoints(app, cfg, diagnosticsStore)
+	setupDiagnosticsEndpoints(app, diagnosticsStore)
 
 	// Graceful shutdown
 	go func() {
@@ -95,6 +119,11 @@ func Start(cfg *config.Config) error {
 	// Start server
 	addr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)
 	fmt.Printf("✅ Proxy running at http://localhost:%s\n", cfg.Port)
+
+	if cfg.DiagnosticsEnabled {
+		fmt.Printf("   Diagnostics: http://127.0.0.1:%s/debug/logs\n", cfg.Port)
+		fmt.Printf("   Diagnostics DB: %s (retention %s)\n", cfg.DiagnosticsDBPath, cfg.DiagnosticsRetention)
+	}
 
 	if cfg.PassthroughMode {
 		fmt.Printf("   Mode: PASSTHROUGH (direct to Anthropic API)\n")
@@ -148,10 +177,10 @@ func getHaikuModel(cfg *config.Config) string {
 	return converter.DefaultHaikuModel + " (pattern-based)"
 }
 
-func setupClaudeEndpoints(app *fiber.App, cfg *config.Config) {
+func setupClaudeEndpoints(app *fiber.App, cfg *config.Config, store *diagnostics.Store) {
 	// Messages endpoint - main Claude API
 	app.Post("/v1/messages", func(c *fiber.Ctx) error {
-		return handleMessages(c, cfg)
+		return handleMessages(c, cfg, store)
 	})
 
 	// Token counting endpoint

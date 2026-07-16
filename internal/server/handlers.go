@@ -12,6 +12,7 @@ import (
 
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/claude-code-proxy/proxy/internal/converter"
+	"github.com/claude-code-proxy/proxy/internal/diagnostics"
 	"github.com/claude-code-proxy/proxy/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
@@ -31,19 +32,15 @@ func addOpenRouterHeaders(req *http.Request, cfg *config.Config) {
 // handleMessages is the main handler for /v1/messages endpoint.
 // It parses Claude requests, converts them to OpenAI format, and routes to either
 // streaming or non-streaming handlers based on the request's stream parameter.
-func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
-	// Debug: Log raw request
-	if cfg.Debug {
-		fmt.Printf("\n=== CLAUDE REQUEST ===\n%s\n===================\n", string(c.Body()))
-	}
+func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) error {
+	trace := newDiagnosticsTrace(c, cfg, store)
 
-	// Parse Claude request
 	var claudeReq models.ClaudeRequest
 	if err := c.BodyParser(&claudeReq); err != nil {
-		// Log the error and raw body for debugging
-		fmt.Printf("[ERROR] Failed to parse request body: %v\n", err)
-		fmt.Printf("[ERROR] Raw body: %s\n", string(c.Body()))
-		return c.Status(400).JSON(fiber.Map{
+		fmt.Printf("[ERROR] Failed to parse request body request_id=%s: %v\n", c.GetRespHeader("X-Request-ID"), err)
+		trace.setMalformedBody(c.Body(), c.Get(fiber.HeaderContentType), err)
+		trace.finish(fiber.StatusBadRequest, err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
 				"type":    "invalid_request_error",
@@ -52,24 +49,22 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 		})
 	}
 
-	// Validate API key (if configured)
-	if cfg.AnthropicAPIKey != "" {
-		apiKey := c.Get("x-api-key")
-		if apiKey != cfg.AnthropicAPIKey {
-			return c.Status(401).JSON(fiber.Map{
-				"type": "error",
-				"error": fiber.Map{
-					"type":    "authentication_error",
-					"message": "Invalid API key",
-				},
-			})
-		}
+	if cfg.AnthropicAPIKey != "" && c.Get("x-api-key") != cfg.AnthropicAPIKey {
+		err := fmt.Errorf("invalid API key")
+		trace.finish(fiber.StatusUnauthorized, err)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"type": "error",
+			"error": fiber.Map{
+				"type":    "authentication_error",
+				"message": "Invalid API key",
+			},
+		})
 	}
 
-	// Convert Claude request to OpenAI format
 	openaiReq, err := converter.ConvertRequest(claudeReq, cfg)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{
+		trace.finish(fiber.StatusBadRequest, err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
 				"type":    "invalid_request_error",
@@ -78,39 +73,23 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 		})
 	}
 
-	// Debug: Log converted OpenAI request
+	streaming := openaiReq.Stream != nil && *openaiReq.Stream
+	trace.setModel(openaiReq.Model, streaming)
 	if cfg.Debug {
-		openaiReqJSON, _ := json.MarshalIndent(openaiReq, "", "  ")
-		fmt.Printf("\n=== OPENAI REQUEST ===\n%s\n===================\n", string(openaiReqJSON))
-		if len(claudeReq.Tools) > 0 {
-			fmt.Printf("[DEBUG] Request has %d tools\n", len(claudeReq.Tools))
-			for i, tool := range openaiReq.Tools {
-				fmt.Printf("[DEBUG] Tool %d: %s\n", i, tool.Function.Name)
-			}
-		}
+		fmt.Printf("[DEBUG] request_id=%s provider=%s model=%s streaming=%t tools=%d\n",
+			c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, streaming, len(openaiReq.Tools))
 	}
 
-	// Debug: Check Stream field
-	if cfg.Debug {
-		if openaiReq.Stream == nil {
-			fmt.Printf("[DEBUG] Stream field is nil\n")
-		} else {
-			fmt.Printf("[DEBUG] Stream field = %v\n", *openaiReq.Stream)
-		}
+	if streaming {
+		return handleStreamingMessages(c, openaiReq, cfg, trace)
 	}
 
-	// Handle streaming vs non-streaming
-	if openaiReq.Stream != nil && *openaiReq.Stream {
-		return handleStreamingMessages(c, openaiReq, cfg)
-	}
-
-	// Track timing for simple log
 	startTime := time.Now()
-
-	// Non-streaming response
-	openaiResp, err := callOpenAI(openaiReq, cfg)
+	openaiResp, err := callOpenAI(openaiReq, cfg, trace)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
+		trace.setResponseBody([]byte(errorJSON(err)))
+		trace.finish(fiber.StatusBadGateway, err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
 				"type":    "api_error",
@@ -119,23 +98,10 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 		})
 	}
 
-	// Debug: Log OpenAI response
-	if cfg.Debug {
-		openaiRespJSON, _ := json.MarshalIndent(openaiResp, "", "  ")
-		fmt.Printf("\n=== OPENAI RESPONSE ===\n%s\n====================\n", string(openaiRespJSON))
-		if len(openaiResp.Choices) > 0 {
-			choice := openaiResp.Choices[0]
-			fmt.Printf("[DEBUG] OpenAI response has %d tool_calls\n", len(choice.Message.ToolCalls))
-			for i, tc := range choice.Message.ToolCalls {
-				fmt.Printf("[DEBUG] ToolCall %d: ID=%s, Name=%s\n", i, tc.ID, tc.Function.Name)
-			}
-		}
-	}
-
-	// Convert OpenAI response to Claude format
 	claudeResp, err := converter.ConvertResponse(openaiResp, claudeReq.Model)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
+		trace.finish(fiber.StatusInternalServerError, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
 				"type":    "api_error",
@@ -143,22 +109,15 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 			},
 		})
 	}
-
-	// Debug: Log Claude response
-	if cfg.Debug {
-		claudeRespJSON, _ := json.MarshalIndent(claudeResp, "", "  ")
-		fmt.Printf("\n=== CLAUDE RESPONSE ===\n%s\n====================\n\n", string(claudeRespJSON))
-		fmt.Printf("[DEBUG] Claude response has %d content blocks\n", len(claudeResp.Content))
-		for i, block := range claudeResp.Content {
-			fmt.Printf("[DEBUG] Block %d: type=%s", i, block.Type)
-			if block.Type == "tool_use" {
-				fmt.Printf(", name=%s, id=%s", block.Name, block.ID)
-			}
-			fmt.Printf("\n")
-		}
+	if encoded, marshalErr := json.Marshal(openaiResp); marshalErr == nil {
+		trace.setResponseBody(encoded)
 	}
+	trace.finish(fiber.StatusOK, nil)
 
-	// Simple log: one-line summary
+	if cfg.Debug {
+		fmt.Printf("[DEBUG] request_id=%s completed status=%d content_blocks=%d\n",
+			c.GetRespHeader("X-Request-ID"), fiber.StatusOK, len(claudeResp.Content))
+	}
 	if cfg.SimpleLog {
 		duration := time.Since(startTime).Seconds()
 		tokensPerSec := 0.0
@@ -167,12 +126,8 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 		}
 		timestamp := time.Now().Format("15:04:05")
 		fmt.Printf("[%s] [REQ] %s model=%s in=%d out=%d tok/s=%.1f\n",
-			timestamp,
-			cfg.OpenAIBaseURL,
-			openaiReq.Model,
-			claudeResp.Usage.InputTokens,
-			claudeResp.Usage.OutputTokens,
-			tokensPerSec)
+			timestamp, cfg.OpenAIBaseURL, openaiReq.Model, claudeResp.Usage.InputTokens,
+			claudeResp.Usage.OutputTokens, tokensPerSec)
 	}
 
 	return c.JSON(claudeResp)
@@ -181,46 +136,38 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config) error {
 // handleStreamingMessages handles streaming SSE responses from the provider.
 // It forwards the OpenAI request, receives streaming chunks, and converts them to
 // Claude's SSE event format in real-time using streamOpenAIToClaude.
-func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, cfg *config.Config) error {
-	// Track timing for simple log
+func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) error {
 	startTime := time.Now()
 
-	// Set SSE headers
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] StreamWriter: Starting\n")
-		}
-
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] StreamWriter: Making streaming request to %s\n", cfg.OpenAIBaseURL+"/chat/completions")
-		}
-
-		// Make streaming request with automatic retry logic
-		resp, err := callOpenAIStream(openaiReq, cfg)
+		trace.stage("stream_started", "")
+		resp, err := callOpenAIStream(openaiReq, cfg, trace)
 		if err != nil {
-			if cfg.Debug {
-				fmt.Printf("[DEBUG] StreamWriter: Request failed: %v\n", err)
-			}
 			writeSSEError(w, fmt.Sprintf("streaming request failed: %v", err))
+			trace.setResponseBody([]byte(errorJSON(err)))
+			trace.finish(fiber.StatusBadGateway, err)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] StreamWriter: Got response, starting streamOpenAIToClaude conversion\n")
+		outcome := streamOpenAIToClaude(w, resp.Body, openaiReq.Model, cfg, startTime)
+		responseMetadata, _ := json.Marshal(map[string]interface{}{
+			"streaming": true,
+			"chunks": outcome.Chunks,
+			"stop_reason": outcome.StopReason,
+			"usage": outcome.Usage,
+		})
+		trace.setResponseBody(responseMetadata)
+		if outcome.Err != nil {
+			trace.finish(fiber.StatusBadGateway, outcome.Err)
+			return
 		}
-
-		// Stream conversion
-		streamOpenAIToClaude(w, resp.Body, openaiReq.Model, cfg, startTime)
-
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] StreamWriter: Completed\n")
-		}
+		trace.finish(fiber.StatusOK, nil)
 	})
 
 	return nil
@@ -250,7 +197,14 @@ type ToolCallState struct {
 //
 // The function maintains state to track content block indices, tool call accumulation,
 // and ensures proper event ordering for Claude Code compatibility.
-func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel string, cfg *config.Config, startTime time.Time) {
+type streamOutcome struct {
+	Chunks     int
+	StopReason string
+	Usage      map[string]interface{}
+	Err        error
+}
+
+func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel string, cfg *config.Config, startTime time.Time) streamOutcome {
 	if cfg.Debug {
 		fmt.Printf("[DEBUG] streamOpenAIToClaude: Starting conversion\n")
 	}
@@ -263,6 +217,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 	toolBlockCounter := 2                            // Tool calls start at index 2
 	currentToolCalls := make(map[int]*ToolCallState)
 	finalStopReason := "end_turn"
+	chunkCount := 0
 	usageData := map[string]interface{}{
 		"input_tokens":                0,
 		"output_tokens":               0,
@@ -335,19 +290,10 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 		if err := json.Unmarshal([]byte(dataJSON), &chunk); err != nil {
 			continue
 		}
-
-		// Log every chunk to see what OpenRouter is sending
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] Raw chunk from OpenRouter: %s\n", dataJSON)
-		}
+		chunkCount++
 
 		// Handle usage data
 		if usage, ok := chunk["usage"].(map[string]interface{}); ok {
-			if cfg.Debug {
-				usageJSON, _ := json.Marshal(usage)
-				fmt.Printf("[DEBUG] Received usage from OpenAI: %s\n", string(usageJSON))
-			}
-
 			// Convert float64 to int for token counts (JSON unmarshals numbers as float64)
 			inputTokens := 0
 			outputTokens := 0
@@ -368,10 +314,6 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 				if cachedTokens, ok := promptTokensDetails["cached_tokens"].(float64); ok && cachedTokens > 0 {
 					usageData["cache_read_input_tokens"] = int(cachedTokens)
 				}
-			}
-			if cfg.Debug {
-				usageDataJSON, _ := json.Marshal(usageData)
-				fmt.Printf("[DEBUG] Accumulated usageData: %s\n", string(usageDataJSON))
 			}
 		}
 
@@ -532,12 +474,6 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 
 		// Handle tool call deltas
 		if toolCallsRaw, ok := delta["tool_calls"]; ok {
-			// Debug: Log raw tool_calls from provider
-			if cfg.Debug {
-				toolCallsJSON, _ := json.Marshal(toolCallsRaw)
-				fmt.Printf("[DEBUG] Raw tool_calls delta: %s\n", string(toolCallsJSON))
-			}
-
 			toolCalls, ok := toolCallsRaw.([]interface{})
 			if ok && len(toolCalls) > 0 {
 				for _, tcRaw := range toolCalls {
@@ -690,11 +626,6 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 	}
 
 	// Send message_delta with stop_reason and accumulated usage data
-	// NOTE: We send the actual accumulated usage to fix the "0 tokens" issue in Claude Code
-	if cfg.Debug {
-		usageDataJSON, _ := json.Marshal(usageData)
-		fmt.Printf("[DEBUG] Sending message_delta with usageData: %s\n", string(usageDataJSON))
-	}
 	writeSSEEvent(w, "message_delta", map[string]interface{}{
 		"type": "message_delta",
 		"delta": map[string]interface{}{
@@ -729,11 +660,6 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 			outputTokens = int(val)
 		}
 
-		// Debug: show what we actually have in usageData
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] usageData: %+v\n", usageData)
-		}
-
 		// Calculate tokens per second
 		duration := time.Since(startTime).Seconds()
 		tokensPerSec := 0.0
@@ -754,7 +680,12 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 	// Check for scanner errors
 	if err := scanner.Err(); err != nil {
 		writeSSEError(w, fmt.Sprintf("stream read error: %v", err))
+		return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData, Err: err}
 	}
+	if cfg.Debug {
+		fmt.Printf("[DEBUG] stream completed model=%s chunks=%d stop_reason=%s\n", providerModel, chunkCount, finalStopReason)
+	}
+	return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData}
 }
 
 // writeSSEEvent writes a Server-Sent Event
@@ -778,9 +709,8 @@ func writeSSEError(w *bufio.Writer, message string) {
 
 // callOpenAI makes an HTTP request to the OpenAI API with automatic retry logic
 // for max_completion_tokens parameter errors. Uses per-model capability caching.
-func callOpenAI(req *models.OpenAIRequest, cfg *config.Config) (*models.OpenAIResponse, error) {
-	// Try the request with the configured parameters
-	resp, err := callOpenAIInternal(req, cfg)
+func callOpenAI(req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*models.OpenAIResponse, error) {
+	resp, err := callOpenAIInternal(req, cfg, trace, false)
 	if err != nil {
 		// Check if this is a max_tokens parameter error
 		if isMaxTokensParameterError(err.Error()) {
@@ -788,7 +718,7 @@ func callOpenAI(req *models.OpenAIRequest, cfg *config.Config) (*models.OpenAIRe
 				fmt.Printf("[DEBUG] Detected max_completion_tokens parameter error for model %s, retrying without it\n", req.Model)
 			}
 			// Retry without max_completion_tokens and cache the capability per model
-			return retryWithoutMaxCompletionTokens(req, cfg)
+			return retryWithoutMaxCompletionTokens(req, cfg, trace)
 		}
 		// Other errors - return as-is
 		return nil, err
@@ -814,9 +744,8 @@ func callOpenAI(req *models.OpenAIRequest, cfg *config.Config) (*models.OpenAIRe
 
 // callOpenAIStream makes a streaming HTTP request with retry logic for parameter errors.
 // Uses per-model capability caching.
-func callOpenAIStream(req *models.OpenAIRequest, cfg *config.Config) (*http.Response, error) {
-	// Try with configured parameters
-	resp, err := callOpenAIStreamInternal(req, cfg)
+func callOpenAIStream(req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*http.Response, error) {
+	resp, err := callOpenAIStreamInternal(req, cfg, trace, false)
 	if err != nil {
 		// Check if this is a max_tokens parameter error
 		if isMaxTokensParameterError(err.Error()) {
@@ -837,7 +766,7 @@ func callOpenAIStream(req *models.OpenAIRequest, cfg *config.Config) (*http.Resp
 				UsesMaxCompletionTokens: false,
 			})
 
-			return callOpenAIStreamInternal(&retryReq, cfg)
+			return callOpenAIStreamInternal(&retryReq, cfg, trace, true)
 		}
 		return nil, err
 	}
@@ -860,15 +789,20 @@ func callOpenAIStream(req *models.OpenAIRequest, cfg *config.Config) (*http.Resp
 }
 
 // callOpenAIStreamInternal makes a streaming HTTP request without retry logic
-func callOpenAIStreamInternal(req *models.OpenAIRequest, cfg *config.Config) (*http.Response, error) {
+func callOpenAIStreamInternal(req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace, retry bool) (result *http.Response, err error) {
+	attempt := trace.beginAttempt(true, retry)
+	statusCode := 0
+	defer func() { trace.endAttempt(attempt, statusCode, err) }()
+
 	// Marshal request to JSON
 	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+	trace.setRequestBody(reqBody)
 
 	// Build API URL
-	apiURL := cfg.OpenAIBaseURL + "/chat/completions"
+	apiURL := cfg.ChatCompletionsURL()
 
 	// Create HTTP request
 	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(reqBody))
@@ -878,6 +812,9 @@ func callOpenAIStreamInternal(req *models.OpenAIRequest, cfg *config.Config) (*h
 
 	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
+	if trace != nil {
+		httpReq.Header.Set("X-Request-ID", trace.event.RequestID)
+	}
 
 	// Skip auth for Ollama (localhost)
 	if !cfg.IsLocalhost() {
@@ -899,12 +836,13 @@ func callOpenAIStreamInternal(req *models.OpenAIRequest, cfg *config.Config) (*h
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
+	statusCode = resp.StatusCode
 
 	// Check for errors
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, diagnosticsBodyLimit+1))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, boundedUpstreamText(body))
 	}
 
 	return resp, nil
@@ -932,7 +870,7 @@ func isMaxTokensParameterError(errorMessage string) bool {
 
 // retryWithoutMaxCompletionTokens attempts the request again without max_completion_tokens.
 // Caches the result per (provider, model) combination for future requests.
-func retryWithoutMaxCompletionTokens(req *models.OpenAIRequest, cfg *config.Config) (*models.OpenAIResponse, error) {
+func retryWithoutMaxCompletionTokens(req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*models.OpenAIResponse, error) {
 	// Create a copy of the request without max_completion_tokens
 	retryReq := *req
 	retryReq.MaxCompletionTokens = 0
@@ -952,19 +890,24 @@ func retryWithoutMaxCompletionTokens(req *models.OpenAIRequest, cfg *config.Conf
 	})
 
 	// Make the retry request
-	return callOpenAIInternal(&retryReq, cfg)
+	return callOpenAIInternal(&retryReq, cfg, trace, true)
 }
 
 // callOpenAIInternal is the internal implementation without retry logic
-func callOpenAIInternal(req *models.OpenAIRequest, cfg *config.Config) (*models.OpenAIResponse, error) {
+func callOpenAIInternal(req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace, retry bool) (result *models.OpenAIResponse, err error) {
+	attempt := trace.beginAttempt(false, retry)
+	statusCode := 0
+	defer func() { trace.endAttempt(attempt, statusCode, err) }()
+
 	// Marshal request to JSON
 	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+	trace.setRequestBody(reqBody)
 
 	// Build API URL
-	apiURL := cfg.OpenAIBaseURL + "/chat/completions"
+	apiURL := cfg.ChatCompletionsURL()
 
 	// Create HTTP request
 	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(reqBody))
@@ -974,6 +917,9 @@ func callOpenAIInternal(req *models.OpenAIRequest, cfg *config.Config) (*models.
 
 	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
+	if trace != nil {
+		httpReq.Header.Set("X-Request-ID", trace.event.RequestID)
+	}
 
 	// Skip auth for Ollama (localhost) - Ollama doesn't require authentication
 	if !cfg.IsLocalhost() {
@@ -995,17 +941,21 @@ func callOpenAIInternal(req *models.OpenAIRequest, cfg *config.Config) (*models.
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
+	statusCode = resp.StatusCode
 	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body
+	// Read response body. Error payloads are bounded before being surfaced or recorded.
+	if resp.StatusCode != http.StatusOK {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, diagnosticsBodyLimit+1))
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read error response: %w", readErr)
+		}
+		return nil, fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, boundedUpstreamText(respBody))
+	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Check for errors
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	// Parse response
@@ -1015,6 +965,31 @@ func callOpenAIInternal(req *models.OpenAIRequest, cfg *config.Config) (*models.
 	}
 
 	return &openaiResp, nil
+}
+
+func boundedUpstreamText(body []byte) string {
+	originalLength := len(body)
+	truncated := originalLength > diagnosticsBodyLimit
+	if truncated {
+		body = body[:diagnosticsBodyLimit]
+	}
+	if !truncated {
+		if redacted, err := diagnostics.RedactJSON(body, diagnostics.RedactionOptions{}); err == nil {
+			return string(redacted)
+		}
+	}
+	metadata := diagnostics.DescribeMalformedBody(body, "application/json", fmt.Errorf("upstream body was not valid complete JSON"))
+	metadata.Length = originalLength
+	if truncated {
+		metadata.Preview = "truncated"
+	}
+	encoded, _ := json.Marshal(metadata)
+	return string(encoded)
+}
+
+func errorJSON(err error) string {
+	encoded, _ := json.Marshal(map[string]string{"error": err.Error()})
+	return string(encoded)
 }
 
 func handleCountTokens(c *fiber.Ctx, cfg *config.Config) error {
