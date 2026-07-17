@@ -224,6 +224,14 @@ func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 		t.Fatalf("unexpected summaries: %#v", summaries)
 	}
 
+	keySummaries, err := store.Query(ctx, Query{APIKeyLabel: "key-1", Limit: 10})
+	if err != nil {
+		t.Fatalf("Query(APIKeyLabel) error = %v", err)
+	}
+	if len(keySummaries) != 1 || keySummaries[0].RequestID != "req-1" {
+		t.Fatalf("unexpected API key summaries: %#v", keySummaries)
+	}
+
 	detail, err := store.Detail(ctx, "req-1")
 	if err != nil {
 		t.Fatalf("Detail() error = %v", err)

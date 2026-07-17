@@ -199,6 +199,8 @@ type Query struct {
 	RequestID       string
 	Model           string
 	Provider        string
+	APIKeyLabel     string
+	APIKeyLabelNot  string
 	CompletionState string
 	Streaming       *bool
 	Since           time.Time
@@ -1312,6 +1314,14 @@ func buildWhere(query Query) (string, []any) {
 	if query.RequestID != "" { clauses = append(clauses, "request_id = ?"); args = append(args, query.RequestID) }
 	if query.Model != "" { clauses = append(clauses, "model = ?"); args = append(args, query.Model) }
 	if query.Provider != "" { clauses = append(clauses, "provider = ?"); args = append(args, query.Provider) }
+	if query.APIKeyLabel != "" {
+		clauses = append(clauses, "api_key_label = ?")
+		args = append(args, query.APIKeyLabel)
+	}
+	if query.APIKeyLabelNot != "" {
+		clauses = append(clauses, "api_key_label != ?")
+		args = append(args, query.APIKeyLabelNot)
+	}
 	if query.CompletionState != "" { clauses = append(clauses, "completion_state = ?"); args = append(args, query.CompletionState) }
 	if query.Streaming != nil { clauses = append(clauses, "streaming = ?"); args = append(args, boolInt(*query.Streaming)) }
 	if !query.Since.IsZero() { clauses = append(clauses, "created_at >= ?"); args = append(args, toMillis(query.Since)) }

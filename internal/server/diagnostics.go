@@ -530,9 +530,15 @@ func diagnosticsQuery(c *fiber.Ctx, defaultLimit int) (diagnostics.Query, error)
 		}
 		streaming = &parsed
 	}
+	apiKeyLabel := c.Query("api_key_label")
+	apiKeyLabelNot := c.Query("api_key_label_not")
+	if strings.HasPrefix(apiKeyLabel, "!") {
+		apiKeyLabelNot = strings.TrimPrefix(apiKeyLabel, "!")
+		apiKeyLabel = ""
+	}
 	return diagnostics.Query{
 		RequestID: c.Query("request_id"), Model: c.Query("model"), Provider: c.Query("provider"),
-		CompletionState: c.Query("completion_state"), Streaming: streaming,
+		APIKeyLabel: apiKeyLabel, APIKeyLabelNot: apiKeyLabelNot, CompletionState: c.Query("completion_state"), Streaming: streaming,
 		Since: since, Until: until, Limit: limit, Offset: offset,
 	}, nil
 }
