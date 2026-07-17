@@ -124,6 +124,8 @@ t.Setenv("OPENAI_API_KEY", "test-key")
 
 	t.Setenv("DIAGNOSTICS_RETENTION", "1h")
 	t.Setenv("DIAGNOSTICS_CONTENT_RETENTION", "2h")
+	t.Setenv("DIAGNOSTICS_ENABLED", "true")
+	t.Setenv("DIAGNOSTICS_CAPTURE_CONTENT", "true")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() expected content retention bound error")
 	}
