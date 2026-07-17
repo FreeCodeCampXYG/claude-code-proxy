@@ -295,13 +295,17 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 
 **Optional - Diagnostics:**
 - `DIAGNOSTICS_ENABLED` - Enable local redacted SQLite diagnostics (`true`, `1`, or `yes`; default: `false`)
+- `DIAGNOSTICS_CAPTURE_CONTENT` - Explicitly retain bounded local sent/received payload snapshots (default: `false`; requires `DIAGNOSTICS_ENABLED=true`)
+- `DIAGNOSTICS_CONTENT_RETENTION` - Content snapshot retention as a positive Go duration no longer than diagnostics retention (default: `1h`)
 - `DIAGNOSTICS_DB_PATH` - Override the SQLite database path
 - `DIAGNOSTICS_RETENTION` - Retention as a positive Go duration (default: `72h`; cleanup runs at startup)
 - `DIAGNOSTICS_BUSY_TIMEOUT` - SQLite busy timeout (default: `5s`)
 
-Diagnostics can also be enabled with `-d`/`--debug`. It takes effect only for a newly started proxy: if one is already running, run `claude-code-proxy stop` first, then restart it with `-d`. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). Check `/health` for `"diagnostics_enabled": true`; the diagnostics routes accept only loopback connections, and forwarded headers do not bypass this restriction.
+Diagnostics can also be enabled with `-d`/`--debug`. It takes effect only for a newly started proxy: if one is already running, run `claude-code-proxy stop` first, then restart it with `-d`. `-d` enables **redacted diagnostics only**; it never enables content capture. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). Check `/health` for `"diagnostics_enabled": true`; the diagnostics routes accept only loopback connections, and forwarded headers do not bypass this restriction.
 
-Captured request and response data is redacted before storage. Secrets and conversational content are replaced with type, length, and SHA-256 metadata; oversized or malformed bodies are stored only as bounded metadata, and successful streams store summaries rather than raw chunks. Operational fields such as model, provider, status, timing, token counts, roles, tool names, request structure, and redaction hashes remain visible. Redaction is key-based, and the local SQLite database is not encrypted, so protect the database and any exported NDJSON as sensitive diagnostic data.
+By default, captured request and response data is redacted before storage. Secrets and conversational content are replaced with type, length, and SHA-256 metadata; oversized or malformed bodies are stored only as bounded metadata, and successful streams store summaries rather than raw chunks. Operational fields such as model, provider, status, timing, token counts, roles, tool names, request structure, and redaction hashes remain visible.
+
+When `DIAGNOSTICS_CAPTURE_CONTENT=true` is explicitly set, the local viewer may retain bounded snapshots of the inbound Claude request, converted upstream request, upstream response, and returned Claude response. Oversized valid JSON is stored as a clearly labelled summary with size/hash and limited previews; malformed data and all request headers remain excluded. Streams are normalized into their semantic content and are never saved as original SSE frames. Content snapshots are short-lived, never included in NDJSON export, and available only through the protected local viewer. The SQLite database is not encrypted, so protect the database directory and any data copied from the viewer as sensitive diagnostic data.
 
 **Optional - Security:**
 - `ANTHROPIC_API_KEY` - Client API key validation (optional)

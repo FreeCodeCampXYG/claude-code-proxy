@@ -51,7 +51,7 @@ func main() {
 	var err error
 	if debug {
 		cfg, err = config.LoadWithDebug(true)
-		fmt.Println("🐛 Diagnostic mode enabled - redacted requests are stored locally")
+		fmt.Println("🐛 Diagnostic mode enabled - redacted requests are stored locally; content capture remains opt-in")
 	} else {
 		cfg, err = config.Load()
 	}
@@ -137,6 +137,8 @@ Configuration:
     OPENAI_BASE_URL                 OpenAI API base URL
     OPENAI_PROVIDER                 auto/openai/openrouter/ollama/newapi/generic
     DIAGNOSTICS_ENABLED             Store redacted diagnostics in SQLite
+    DIAGNOSTICS_CAPTURE_CONTENT     Store bounded local payload snapshots (default: false)
+    DIAGNOSTICS_CONTENT_RETENTION   Payload snapshot retention (default: 1h)
     DIAGNOSTICS_DB_PATH             Override diagnostics database path
     DIAGNOSTICS_RETENTION           Retention duration (default: 72h)
     HOST                            Server host (default: 0.0.0.0)

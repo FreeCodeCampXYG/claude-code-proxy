@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
@@ -33,8 +34,10 @@ func Start(cfg *config.Config) error {
 	if cfg.DiagnosticsEnabled {
 		var err error
 		diagnosticsStore, err = diagnostics.Open(cfg.DiagnosticsDBPath, diagnostics.StoreOptions{
-			Retention: cfg.DiagnosticsRetention,
-			BusyTimeout: cfg.DiagnosticsBusyTimeout,
+			Retention:        cfg.DiagnosticsRetention,
+			ContentRetention: cfg.DiagnosticsContentRetention,
+			CaptureContent:   cfg.DiagnosticsCaptureContent,
+			BusyTimeout:      cfg.DiagnosticsBusyTimeout,
 		})
 		if err != nil {
 			return fmt.Errorf("initialize diagnostics store: %w", err)
@@ -58,11 +61,17 @@ func Start(cfg *config.Config) error {
 	// Middleware
 	app.Use(recover.New())
 	app.Use(requestIDMiddleware)
-	app.Use(cors.New(cors.Config{
+	proxyCORS := cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "*",
-	}))
+	})
+	app.Use(func(c *fiber.Ctx) error {
+		if strings.HasPrefix(c.Path(), "/debug/logs") {
+			return c.Next()
+		}
+		return proxyCORS(c)
+	})
 
 	// Enable HTTP logging only when simple log mode is enabled
 	if cfg.SimpleLog {
@@ -126,6 +135,11 @@ func Start(cfg *config.Config) error {
 	if cfg.DiagnosticsEnabled {
 		fmt.Printf("   Diagnostics: http://127.0.0.1:%s/debug/logs\n", cfg.Port)
 		fmt.Printf("   Diagnostics DB: %s (retention %s)\n", cfg.DiagnosticsDBPath, cfg.DiagnosticsRetention)
+		if cfg.DiagnosticsCaptureContent {
+			fmt.Printf("   Diagnostics content capture: enabled (retention %s; local sensitive data)\n", cfg.DiagnosticsContentRetention)
+		} else {
+			fmt.Println("   Diagnostics content capture: disabled (redacted diagnostics only)")
+		}
 	}
 
 	if cfg.PassthroughMode {

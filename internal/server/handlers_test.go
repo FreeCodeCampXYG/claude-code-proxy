@@ -34,6 +34,55 @@ func TestRequestIDMiddlewareReplacesInboundHeader(t *testing.T) {
 	}
 }
 
+func TestHandleMessagesCapturesAllContentBoundariesOnlyWhenEnabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","choices":[{"message":{"role":"assistant","content":"provider secret"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	store, err := diagnostics.Open(filepath.Join(t.TempDir(), "content.db"), diagnostics.StoreOptions{Retention: time.Hour, ContentRetention: time.Hour, CaptureContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key", DiagnosticsCaptureContent: true}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"user secret"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
+	if err != nil || resp.StatusCode != fiber.StatusOK {
+		if resp != nil { resp.Body.Close() }
+		t.Fatalf("request failed: response=%v error=%v", resp, err)
+	}
+	resp.Body.Close()
+	requestID := resp.Header.Get("X-Request-ID")
+	_ = awaitDiagnosticEvent(t, store, requestID)
+	var snapshots []diagnostics.ContentSnapshot
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshots, err = store.Content(t.Context(), diagnostics.ContentQuery{RequestID: requestID})
+		if err == nil && len(snapshots) == 4 { break }
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(snapshots) != 4 {
+		t.Fatalf("content snapshots = %#v, want four boundaries", snapshots)
+	}
+	boundaries := map[diagnostics.ContentBoundary]bool{}
+	for _, snapshot := range snapshots {
+		boundaries[snapshot.Boundary] = true
+		if strings.Contains(string(snapshot.Content), "secret-key") {
+			t.Fatalf("credential leaked in snapshot: %s", snapshot.Content)
+		}
+	}
+	for _, boundary := range []diagnostics.ContentBoundary{diagnostics.ContentBoundaryClaudeRequest, diagnostics.ContentBoundaryUpstreamRequest, diagnostics.ContentBoundaryUpstreamResponse, diagnostics.ContentBoundaryClaudeResponse} {
+		if !boundaries[boundary] { t.Fatalf("missing content boundary %q", boundary) }
+	}
+}
+
 func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -63,10 +112,7 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 		t.Fatalf("unexpected status %d: %s", resp.StatusCode, responseBody)
 	}
 
-	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
 	if strings.Contains(string(event.RequestBody), "user secret") {
 		t.Fatalf("request body was not redacted: %s", event.RequestBody)
 	}
@@ -82,6 +128,34 @@ func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	}
 	if event.AttemptCount != 1 || event.RetryCount != 0 || event.InputTokens != 1 || event.OutputTokens != 1 || event.CacheReadInputTokens != 3 || event.CacheCreationInputTokens != 4 || event.StopReason != "stop" || event.CompletionState != completionCompleted {
 		t.Fatalf("unexpected normalized diagnostics: %#v", event)
+	}
+}
+
+func TestHandleMessagesRejectsResponsesAPIResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_test","object":"response","output":[{"type":"message"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != fiber.StatusBadGateway {
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "Responses API payload") || !strings.Contains(string(body), "Chat Completions") {
+		t.Fatalf("expected descriptive invalid-response body, got %s", body)
 	}
 }
 
@@ -106,10 +180,7 @@ func TestInvalidInboundAPIKeyHasLocalAuthenticationDiagnostics(t *testing.T) {
 	if resp.StatusCode != fiber.StatusUnauthorized || upstreamCalls != 0 {
 		t.Fatalf("status=%d upstream calls=%d, want 401 and no upstream call", resp.StatusCode, upstreamCalls)
 	}
-	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
 	if event.CompletionState != completionLocalAuthentication || event.FailureKind != failureLocalAuthentication || event.AttemptCount != 0 {
 		t.Fatalf("invalid-key diagnostics = %#v", event)
 	}
@@ -133,10 +204,7 @@ func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
 	if resp.StatusCode != fiber.StatusBadRequest {
 		t.Fatalf("unexpected status %d", resp.StatusCode)
 	}
-	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
 	if len(event.RequestBody) != 0 || strings.Contains(string(event.Metadata), "private malformed content") {
 		t.Fatalf("malformed raw body leaked: request=%s metadata=%s", event.RequestBody, event.Metadata)
 	}
@@ -196,10 +264,18 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 		_ = listener.Close()
 	})
 
+	var diagnosticsToken string
 	request := func(path string) *http.Response {
 		t.Helper()
 		for attempt := 0; attempt < 20; attempt++ {
-			resp, err := http.Get("http://" + listener.Addr().String() + path)
+			req, requestErr := http.NewRequest(http.MethodGet, "http://"+listener.Addr().String()+path, nil)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			if diagnosticsToken != "" {
+				req.Header.Set("X-Diagnostics-Token", diagnosticsToken)
+			}
+			resp, err := http.DefaultClient.Do(req)
 			if err == nil {
 				return resp
 			}
@@ -207,6 +283,19 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 		}
 		t.Fatalf("request %s: proxy did not accept loopback connection", path)
 		return nil
+	}
+
+	bootstrap := request("/debug/logs")
+	pageBytes, _ := io.ReadAll(bootstrap.Body)
+	bootstrap.Body.Close()
+	const tokenPrefix = "window.__diagnosticsToken="
+	start := strings.Index(string(pageBytes), tokenPrefix)
+	if start < 0 {
+		t.Fatal("dashboard did not inject diagnostics token")
+	}
+	encodedToken, _, ok := strings.Cut(string(pageBytes[start+len(tokenPrefix):]), ";")
+	if !ok || json.Unmarshal([]byte(encodedToken), &diagnosticsToken) != nil || diagnosticsToken == "" {
+		t.Fatal("dashboard returned invalid diagnostics token")
 	}
 
 	resp := request("/debug/logs/analytics?since=2026-07-16")
@@ -300,14 +389,13 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	resp.Body.Close()
 	text := string(page)
 	// Keep these contract fragments aligned with diagnosticsHTML. This deliberately
-	// validates the embedded dashboard's user-visible localization, exact finite
-	// range (`until`) behavior, race-safe pagination, and textContent-only rendering
-	// without requiring a browser test dependency. Pagination uses pageOffset inside
-	// pages() rather than the mutable global offset, so do not change this fragment
-	// to "offset+pageSize>=total".
+	// checks the dependency-free, Chinese accessible master-detail viewer without a
+	// browser test dependency: its token-aware request helper, demand-loaded content,
+	// graceful paging fallback, SVG chart, query controls, and textContent-only
+	// rendering are all part of the local-page contract.
 	for _, required := range []string{
-		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "完成状态", "请求详情", "确定要删除所有诊断记录吗？", "已完成",
-		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "events.set('limit',String(pageSize))", "events.set('offset',String(requestedOffset))", "$('previous').disabled=true;$('next').disabled=true", "pages(pageTotal,pageCount,requestedOffset)", "offset===requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':value}", "breakdown('models',a.by_model||[],localized)", "breakdown('providers',a.by_provider||[],localized)", "$('export').href=endpoint('/debug/logs/export',range)", "offset=0", "pageOffset+pageSize>=total", "textContent", "/debug/logs/analytics",
+		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "筛选请求", "请求主从视图", "请求列表", "请求详情", "脱敏 JSON", "本地内容", "确定要删除所有诊断记录吗？", "已完成",
+		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "eventsParams.set('limit',String(pageSize))", "eventsParams.set('offset',String(requestedOffset))", "const requestedOffset=offset", "offset!==requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':String(value)}", "breakdown('models',analytics.by_model||[],localized)", "breakdown('providers',analytics.by_provider||[],localized)", "completion_state", "request_id", "window.__diagnosticsToken", "X-Diagnostics-Token", "/debug/logs/'+encodeURIComponent(selectedID)+'/content", "page.total", "总数暂不可用", "createElementNS('http://www.w3.org/2000/svg'", "输入与输出令牌趋势", "textContent", "/debug/logs/analytics",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("dashboard missing %q", required)
@@ -354,6 +442,20 @@ func TestStrictRFC3339AcceptsOffsets(t *testing.T) {
 	if err != nil || parsed != time.Date(2026, 7, 16, 10, 30, 0, 0, time.UTC) || parsed.Location() != time.UTC {
 		t.Fatalf("strictRFC3339(%q) = %v, %v", value, parsed, err)
 	}
+}
+
+func awaitDiagnosticEvent(t *testing.T, store *diagnostics.Store, requestID string) diagnostics.Event {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		event, err := store.Detail(t.Context(), requestID)
+		if err == nil {
+			return event
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("diagnostic event %q was not persisted", requestID)
+	return diagnostics.Event{}
 }
 
 func openDiagnosticsTestStore(t *testing.T) *diagnostics.Store {

@@ -29,8 +29,9 @@ const (
 )
 
 const (
-	DefaultDiagnosticsRetention   = 72 * time.Hour
-	DefaultDiagnosticsBusyTimeout = 5 * time.Second
+	DefaultDiagnosticsRetention        = 72 * time.Hour
+	DefaultDiagnosticsContentRetention = time.Hour
+	DefaultDiagnosticsBusyTimeout      = 5 * time.Second
 )
 
 // CacheKey uniquely identifies a (provider, model) combination for capability caching
@@ -65,10 +66,12 @@ type Config struct {
 	AnthropicAPIKey string
 
 	// Diagnostics storage
-	DiagnosticsEnabled     bool
-	DiagnosticsDBPath      string
-	DiagnosticsRetention   time.Duration
-	DiagnosticsBusyTimeout time.Duration
+	DiagnosticsEnabled          bool
+	DiagnosticsCaptureContent   bool
+	DiagnosticsDBPath           string
+	DiagnosticsRetention        time.Duration
+	DiagnosticsContentRetention time.Duration
+	DiagnosticsBusyTimeout      time.Duration
 
 	// Model routing (pattern-based if not set)
 	OpusModel   string
@@ -123,10 +126,12 @@ func Load() (*Config, error) {
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 
 		// Diagnostics storage
-		DiagnosticsEnabled:     getEnvAsBoolOrDefault("DIAGNOSTICS_ENABLED", false),
-		DiagnosticsDBPath:      os.Getenv("DIAGNOSTICS_DB_PATH"),
-		DiagnosticsRetention:   getEnvAsDurationOrDefault("DIAGNOSTICS_RETENTION", DefaultDiagnosticsRetention),
-		DiagnosticsBusyTimeout: getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
+		DiagnosticsEnabled:          getEnvAsBoolOrDefault("DIAGNOSTICS_ENABLED", false),
+		DiagnosticsCaptureContent:   getEnvAsBoolOrDefault("DIAGNOSTICS_CAPTURE_CONTENT", false),
+		DiagnosticsDBPath:           os.Getenv("DIAGNOSTICS_DB_PATH"),
+		DiagnosticsRetention:        getEnvAsDurationOrDefault("DIAGNOSTICS_RETENTION", DefaultDiagnosticsRetention),
+		DiagnosticsContentRetention: getEnvAsDurationOrDefault("DIAGNOSTICS_CONTENT_RETENTION", DefaultDiagnosticsContentRetention),
+		DiagnosticsBusyTimeout:      getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
 
 		// Pattern-based routing (optional overrides)
 		OpusModel:   os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"),
@@ -153,6 +158,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.DiagnosticsRetention <= 0 {
 		return nil, fmt.Errorf("DIAGNOSTICS_RETENTION must be a positive Go duration")
+	}
+	if cfg.DiagnosticsCaptureContent && !cfg.DiagnosticsEnabled {
+		return nil, fmt.Errorf("DIAGNOSTICS_CAPTURE_CONTENT requires DIAGNOSTICS_ENABLED=true")
+	}
+	if cfg.DiagnosticsCaptureContent && cfg.DiagnosticsContentRetention <= 0 {
+		return nil, fmt.Errorf("DIAGNOSTICS_CONTENT_RETENTION must be a positive Go duration when content capture is enabled")
+	}
+	if cfg.DiagnosticsCaptureContent && cfg.DiagnosticsContentRetention > cfg.DiagnosticsRetention {
+		return nil, fmt.Errorf("DIAGNOSTICS_CONTENT_RETENTION must not exceed DIAGNOSTICS_RETENTION")
 	}
 	if cfg.DiagnosticsBusyTimeout <= 0 {
 		return nil, fmt.Errorf("DIAGNOSTICS_BUSY_TIMEOUT must be a positive Go duration")

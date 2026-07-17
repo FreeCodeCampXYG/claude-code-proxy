@@ -13,6 +13,32 @@ import (
 	"time"
 )
 
+func TestStoreContentRetentionAndPartialSummary(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t, StoreOptions{Retention: 2 * time.Hour, ContentRetention: time.Hour, CaptureContent: true, Now: func() time.Time { return now }})
+	if err := store.Insert(t.Context(), Event{RequestID: "content-event", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"payload":"` + strings.Repeat("x", DefaultMaxContentBytes) + `"}`)
+	content, mode, err := RepresentJSONContent(body, ContentRepresentationOptions{MaxBytes: 128, PreviewBytes: 16})
+	if err != nil || mode != ContentCaptureSummary || !json.Valid(content) {
+		t.Fatalf("RepresentJSONContent() = %s, %q, %v", content, mode, err)
+	}
+	if err := store.InsertContent(t.Context(), ContentSnapshot{RequestID: "content-event", Boundary: ContentBoundaryClaudeRequest, Content: content, CaptureMode: mode}); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := store.Content(t.Context(), ContentQuery{RequestID: "content-event"})
+	if err != nil || len(snapshots) != 1 || snapshots[0].CaptureMode != ContentCaptureSummary {
+		t.Fatalf("Content() = %#v, %v", snapshots, err)
+	}
+	if _, err := store.CleanupBefore(t.Context(), now.Add(-3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots, err := store.Content(t.Context(), ContentQuery{RequestID: "content-event"}); err != nil || len(snapshots) != 1 {
+		t.Fatalf("cleanup should retain current content: %#v, %v", snapshots, err)
+	}
+}
+
 func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	store := openTestStore(t, StoreOptions{})
 	ctx := context.Background()
@@ -93,7 +119,7 @@ func TestStoreMigratesV1PreservingRows(t *testing.T) {
 		t.Fatalf("migrated event = %#v, %v", event, err)
 	}
 	var version int
-	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("schema version = %d, %v", version, err)
 	}
 }
@@ -102,7 +128,7 @@ func TestStoreRejectsNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "diagnostics.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil { t.Fatal(err) }
-	if _, err := db.Exec("PRAGMA user_version=3"); err != nil { t.Fatal(err) }
+	if _, err := db.Exec("PRAGMA user_version=4"); err != nil { t.Fatal(err) }
 	_ = db.Close()
 	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("Open() error = %v, want newer schema rejection", err)

@@ -14,6 +14,19 @@ import (
 	"github.com/claude-code-proxy/proxy/internal/config"
 )
 
+func TestStreamOpenAIToClaudeIgnoresAnnotationOnlyChatChunk(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"finish_reason":null,"content_filter_results":{"hate":{"filtered":false}}}]}`,
+		`data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n"
+	var output bytes.Buffer
+	outcome := streamOpenAIToClaude(bufio.NewWriter(&output), strings.NewReader(input), "claude", "gpt", &config.Config{}, time.Now(), nil)
+	if outcome.Err != nil || !strings.Contains(output.String(), "answer") || !strings.Contains(output.String(), "event: message_stop") {
+		t.Fatalf("annotation-only chunk broke stream: error=%v output=%s", outcome.Err, output.String())
+	}
+}
+
 func TestStreamOpenAIToClaudeUsesThinkingField(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -323,11 +336,27 @@ func TestStreamOpenAIToClaudeReasoningPrecedence(t *testing.T) {
 	if outcome.Err != nil {
 		t.Fatal(outcome.Err)
 	}
-	if strings.Count(output.String(), "preferred") != 1 || strings.Contains(output.String(), "duplicate") || strings.Count(output.String(), "real-signature") != 1 {
+	if strings.Count(output.String(), "preferred") != 1 || strings.Contains(output.String(), "duplicate") || strings.Contains(output.String(), "real-signature") {
 		t.Fatalf("unexpected reasoning output: %s", output.String())
 	}
-	if !strings.Contains(output.String(), `"type":"signature_delta"`) {
-		t.Fatalf("compatible signature was not emitted: %s", output.String())
+	if strings.Contains(output.String(), `"type":"signature_delta"`) {
+		t.Fatalf("signature from a lower-priority source was emitted: %s", output.String())
+	}
+}
+
+func TestStreamOpenAIToClaudeRejectsResponsesPayload(t *testing.T) {
+	input := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"output\":[]}}\n\ndata: [DONE]\n"
+	var output bytes.Buffer
+	outcome := streamOpenAIToClaude(bufio.NewWriter(&output), strings.NewReader(input), "claude", "gpt", &config.Config{}, time.Now(), nil)
+	completionState, failureKind := classifyFailure(outcome.Err)
+	if outcome.Err == nil || completionState != completionInvalidResponse || failureKind != failureInvalidResponse {
+		t.Fatalf("error = %v, state=%q kind=%q", outcome.Err, completionState, failureKind)
+	}
+	if !strings.Contains(outcome.Err.Error(), "Responses API payload") || !strings.Contains(output.String(), "event: error") {
+		t.Fatalf("expected descriptive SSE error, got error=%v output=%s", outcome.Err, output.String())
+	}
+	if strings.Contains(output.String(), "event: message_delta") || strings.Contains(output.String(), "event: message_stop") {
+		t.Fatalf("Responses payload emitted successful terminal events: %s", output.String())
 	}
 }
 

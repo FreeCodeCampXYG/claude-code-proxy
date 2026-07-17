@@ -87,16 +87,25 @@ C:\Users\<用户名>\AppData\Local\claude-code-proxy\diagnostics.db
 
 `DIAGNOSTICS_DB_PATH` 指向的父目录不存在时会自动创建。默认保留期为 `72h`，可用 `DIAGNOSTICS_RETENTION` 覆盖；启动时会清理过期记录。
 
-### 绝不持久化的内容
+### 默认不持久化的内容
 
-不得为了排查问题恢复保存或控制台打印以下原始内容：
+默认诊断模式不得为了排查问题恢复保存或控制台打印以下原始内容：
 
 - API key、`Authorization`、Cookie；
 - 原始提示词、源码、工具参数值、工具结果；
 - thinking / reasoning 正文；
 - 原始 SSE 流分块。
 
-可保存且应继续保持的内容包括：模型、provider、状态码、请求 ID、耗时、重试次数、字段是否存在、消息/工具数量、类型/长度/哈希、token usage、受限错误摘要及脱敏 JSON 结构。
+默认可保存且应继续保持的内容包括：模型、provider、状态码、请求 ID、耗时、重试次数、字段是否存在、消息/工具数量、类型/长度/哈希、token usage、受限错误摘要及脱敏 JSON 结构。
+
+### 显式本机内容抓取
+
+只有同时配置 `DIAGNOSTICS_ENABLED=true` 和 `DIAGNOSTICS_CAPTURE_CONTENT=true` 时，才允许为本机排障短期保存内容快照；`-d` 只开启脱敏诊断，**不得**自动开启内容抓取。该选项保存的是入站 Claude 请求、实际发送的转换后上游请求、上游响应与回给 Claude Code 的响应四个边界。非流式仅保存有界的有效 JSON；流式仅保存归并后的语义内容，绝不保存可重放的原始 SSE 帧。
+
+- 单份快照必须有严格大小上限；超长的有效 JSON 只能保存带完整长度/哈希及明确截断标记的受限摘要，malformed 内容仍只保存长度、SHA-256 与解析错误；
+- 不得保存请求头、API key、`Authorization`、Cookie；内容数据库/文件未加密，短期保留，且内容不进入列表、分析、普通详情或 NDJSON 导出；
+- 内容接口仅供受保护的 loopback 诊断页面按需读取；
+- 诊断是旁路能力：队列满、SQLite 繁忙或快照失败时，只允许丢弃诊断数据并输出脱敏告警，绝不阻塞、延迟或改变代理请求、重试、SSE 写入、取消与错误语义。
 
 - 诊断请求 ID 由服务端重新生成，并回传给 Claude 客户端，同时以 `X-Request-ID` 转发上游；不信任客户端自带 ID。
 - malformed JSON 只保存长度、SHA-256 与解析错误，不保存原文。

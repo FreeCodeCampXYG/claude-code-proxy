@@ -56,29 +56,81 @@ func extractSystemText(system interface{}) string {
 	return ""
 }
 
-// extractReasoningText extracts text from OpenRouter reasoning_details
-// Handles different reasoning detail types: reasoning.text, reasoning.summary, reasoning.encrypted
-func extractReasoningText(detail map[string]interface{}) string {
-	detailType, _ := detail["type"].(string)
+// ReasoningBlock is one visible upstream reasoning fragment. Source identifies the
+// response field that supplied the fragment so streaming never transfers a
+// signature between incompatible provider fields.
+type ReasoningBlock struct {
+	Text      string
+	Signature string
+	Source    string
+}
 
-	switch detailType {
-	case "reasoning.text":
-		// Extract text field
-		if text, ok := detail["text"].(string); ok {
-			return text
+// NormalizeReasoning extracts visible Chat Completions reasoning from the
+// incompatible provider fields. A usable higher-priority field wins as a whole:
+// reasoning_content, then reasoning, then reasoning_details. Encrypted and
+// opaque fragments are never exposed, and a signature stays with the fragment
+// object that supplied it.
+func NormalizeReasoning(reasoningContent, reasoning, reasoningDetails interface{}) []ReasoningBlock {
+	for _, candidate := range []struct {
+		source string
+		value  interface{}
+	}{
+		{source: "reasoning_content", value: reasoningContent},
+		{source: "reasoning", value: reasoning},
+		{source: "reasoning_details", value: reasoningDetails},
+	} {
+		if blocks := normalizeReasoningValue(candidate.value, candidate.source); len(blocks) > 0 {
+			return blocks
 		}
-	case "reasoning.summary":
-		// Extract summary field
-		if summary, ok := detail["summary"].(string); ok {
-			return summary
+	}
+	return nil
+}
+
+func normalizeReasoningValue(value interface{}, source string) []ReasoningBlock {
+	switch value := value.(type) {
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
 		}
-	case "reasoning.encrypted":
-		// Skip encrypted reasoning - it's base64 encrypted data not meant to be shown
-		// Models like Grok send this alongside reasoning.summary
-		return ""
+		return []ReasoningBlock{{Text: value, Source: source}}
+	case []interface{}:
+		var blocks []ReasoningBlock
+		for index, item := range value {
+			blocks = append(blocks, normalizeReasoningValue(item, fmt.Sprintf("%s[%d]", source, index))...)
+		}
+		return blocks
+	case map[string]interface{}:
+		return normalizeReasoningObject(value, source)
+	default:
+		return nil
+	}
+}
+
+func normalizeReasoningObject(value map[string]interface{}, source string) []ReasoningBlock {
+	reasoningType, _ := value["type"].(string)
+	reasoningType = strings.ToLower(reasoningType)
+	if strings.Contains(reasoningType, "encrypt") || strings.Contains(reasoningType, "opaque") {
+		return nil
 	}
 
-	return ""
+	for _, field := range []string{"text", "summary", "content"} {
+		if text, ok := value[field].(string); ok && strings.TrimSpace(text) != "" {
+			signature, _ := value["signature"].(string)
+			return []ReasoningBlock{{Text: text, Signature: signature, Source: source}}
+		}
+	}
+
+	// Some compatible gateways wrap a reasoning value in another object or
+	// array. Do not propagate this object's signature into the nested value:
+	// it belongs only to this exact object.
+	for _, field := range []string{"reasoning_content", "reasoning", "reasoning_details", "details", "content"} {
+		if nested, ok := value[field]; ok {
+			if blocks := normalizeReasoningValue(nested, source+"."+field); len(blocks) > 0 {
+				return blocks
+			}
+		}
+	}
+	return nil
 }
 
 // ConvertRequest converts a Claude API request to OpenAI format
@@ -343,12 +395,15 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 			if len(textParts) > 0 || len(toolCalls) > 0 {
 				if !hasToolResult {
 					textContent := strings.Join(textParts, "\n")
-					openaiMessages = append(openaiMessages, models.OpenAIMessage{
-						Role:             msg.Role,
-						Content:          textContent,
-						ToolCalls:        toolCalls,
-						ReasoningContent: strings.Join(thinkingParts, "\n"),
-					})
+					openaiMessage := models.OpenAIMessage{
+						Role:      msg.Role,
+						Content:   textContent,
+						ToolCalls: toolCalls,
+					}
+					if len(thinkingParts) > 0 {
+						openaiMessage.ReasoningContent = strings.Join(thinkingParts, "\n")
+					}
+					openaiMessages = append(openaiMessages, openaiMessage)
 				}
 			}
 
@@ -381,30 +436,16 @@ func convertTools(claudeTools []models.Tool) []models.OpenAITool {
 	return openaiTools
 }
 
-// thinkingBlocks extracts visible provider reasoning into Claude thinking blocks.
+// thinkingBlocks converts normalized visible reasoning into Claude thinking blocks.
 // Only upstream-provided signatures are forwarded; this proxy never fabricates them.
 func thinkingBlocks(message models.OpenAIMessage) []models.ContentBlock {
-	var blocks []models.ContentBlock
-	if message.ReasoningContent != "" {
-		blocks = append(blocks, models.ContentBlock{
-			Type:     "thinking",
-			Thinking: message.ReasoningContent,
-		})
-	}
-	for _, reasoningDetail := range message.ReasoningDetails {
-		detailMap, ok := reasoningDetail.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		thinkingText := extractReasoningText(detailMap)
-		if thinkingText == "" {
-			continue
-		}
-		signature, _ := detailMap["signature"].(string)
+	reasoningBlocks := NormalizeReasoning(message.ReasoningContent, message.Reasoning, message.ReasoningDetails)
+	blocks := make([]models.ContentBlock, 0, len(reasoningBlocks))
+	for _, reasoningBlock := range reasoningBlocks {
 		blocks = append(blocks, models.ContentBlock{
 			Type:      "thinking",
-			Thinking:  thinkingText,
-			Signature: signature,
+			Thinking:  reasoningBlock.Text,
+			Signature: reasoningBlock.Signature,
 		})
 	}
 	return blocks

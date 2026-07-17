@@ -93,21 +93,23 @@ func TestDiagnosticsConfig(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
 	t.Setenv("DIAGNOSTICS_ENABLED", " TRUE ")
+	t.Setenv("DIAGNOSTICS_CAPTURE_CONTENT", "true")
 	t.Setenv("DIAGNOSTICS_DB_PATH", filepath.Join(t.TempDir(), "diagnostics.db"))
 	t.Setenv("DIAGNOSTICS_RETENTION", "48h")
+	t.Setenv("DIAGNOSTICS_CONTENT_RETENTION", "45m")
 	t.Setenv("DIAGNOSTICS_BUSY_TIMEOUT", "2500ms")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !cfg.DiagnosticsEnabled || cfg.DiagnosticsRetention != 48*time.Hour || cfg.DiagnosticsBusyTimeout != 2500*time.Millisecond {
+	if !cfg.DiagnosticsEnabled || !cfg.DiagnosticsCaptureContent || cfg.DiagnosticsRetention != 48*time.Hour || cfg.DiagnosticsContentRetention != 45*time.Minute || cfg.DiagnosticsBusyTimeout != 2500*time.Millisecond {
 		t.Fatalf("unexpected diagnostics config: %#v", cfg)
 	}
 }
 
 func TestInvalidConfigOverrides(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "test-key")
+t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
 	t.Setenv("OPENAI_PROVIDER", "invalid")
 	if _, err := Load(); err == nil {
@@ -118,6 +120,19 @@ func TestInvalidConfigOverrides(t *testing.T) {
 	t.Setenv("DIAGNOSTICS_RETENTION", "invalid")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() expected invalid diagnostics retention error")
+	}
+
+	t.Setenv("DIAGNOSTICS_RETENTION", "1h")
+	t.Setenv("DIAGNOSTICS_CONTENT_RETENTION", "2h")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected content retention bound error")
+	}
+
+	t.Setenv("DIAGNOSTICS_CONTENT_RETENTION", "30m")
+	t.Setenv("DIAGNOSTICS_ENABLED", "false")
+	t.Setenv("DIAGNOSTICS_CAPTURE_CONTENT", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected content capture enablement error")
 	}
 }
 

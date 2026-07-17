@@ -51,7 +51,6 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 			},
 		})
 	}
-
 	if cfg.AnthropicAPIKey != "" && c.Get("x-api-key") != cfg.AnthropicAPIKey {
 		err := fmt.Errorf("invalid API key")
 		trace.finish(fiber.StatusUnauthorized, diagnosticFailure(completionLocalAuthentication, failureLocalAuthentication, err))
@@ -63,6 +62,8 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 			},
 		})
 	}
+
+	trace.capture(diagnostics.ContentBoundaryClaudeRequest, 0, c.Body())
 
 	openaiReq, err := converter.ConvertRequest(claudeReq, cfg)
 	if err != nil {
@@ -111,6 +112,9 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 				"message": fmt.Sprintf("Response conversion error: %v", err),
 			},
 		})
+	}
+	if encoded, marshalErr := json.Marshal(claudeResp); marshalErr == nil {
+		trace.capture(diagnostics.ContentBoundaryClaudeResponse, 0, encoded)
 	}
 	if encoded, marshalErr := json.Marshal(openaiResp); marshalErr == nil {
 		trace.setResponseBody(encoded)
@@ -180,6 +184,8 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			"usage": outcome.Usage,
 		})
 		trace.setResponseBody(responseMetadata)
+		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, 1, outcome.Semantic)
+		trace.capture(diagnostics.ContentBoundaryClaudeResponse, 0, outcome.Semantic)
 		inputTokens := usageInt(outcome.Usage, "input_tokens")
 		outputTokens := usageInt(outcome.Usage, "output_tokens")
 		cacheReadInputTokens := usageInt(outcome.Usage, "cache_read_input_tokens")
@@ -225,6 +231,7 @@ type streamOutcome struct {
 	Chunks     int
 	StopReason string
 	Usage      map[string]interface{}
+	Semantic   json.RawMessage
 	Err        error
 }
 
@@ -239,10 +246,12 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 	nextBlockIndex := 0
 	openBlockIndex := -1
 	openBlockType := ""
+	openBlockSource := ""
 	currentToolCalls := make(map[int]*ToolCallState)
 	finalStopReason := "end_turn"
 	finishSeen, doneSeen := false, false
 	chunkCount := 0
+	var thinkingParts, textParts []string
 	usageData := map[string]interface{}{
 		"input_tokens": 0, "output_tokens": 0,
 		"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
@@ -274,10 +283,11 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		}
 		openBlockIndex = -1
 		openBlockType = ""
+		openBlockSource = ""
 		return nil
 	}
-	startBlock := func(blockType string, contentBlock map[string]interface{}) (int, error) {
-		if openBlockType == blockType {
+	startBlock := func(blockType, source string, contentBlock map[string]interface{}) (int, error) {
+		if openBlockType == blockType && openBlockSource == source {
 			return openBlockIndex, nil
 		}
 		if err := stopOpenBlock(); err != nil {
@@ -292,6 +302,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		}
 		openBlockIndex = index
 		openBlockType = blockType
+		openBlockSource = source
 		return index, nil
 	}
 
@@ -356,55 +367,46 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		}
 
 		choices, ok := chunk["choices"].([]interface{})
-		if !ok || len(choices) == 0 { continue }
-		choice, ok := choices[0].(map[string]interface{})
-		if !ok { continue }
-		delta, _ := choice["delta"].(map[string]interface{})
-
-		thinkingText, signature := "", ""
-		if details, ok := delta["reasoning_details"].([]interface{}); ok {
-			var detailsText strings.Builder
-			for _, raw := range details {
-				detail, ok := raw.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if signature == "" {
-					signature, _ = detail["signature"].(string)
-				}
-				var value string
-				switch detail["type"] {
-				case "reasoning.text":
-					value, _ = detail["text"].(string)
-				case "reasoning.summary":
-					value, _ = detail["summary"].(string)
-				}
-				detailsText.WriteString(value)
+		if !ok || len(choices) == 0 {
+			if isResponsesPayload(chunk) {
+				streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
+					fmt.Errorf("invalid upstream stream response: received Responses API payload; expected Chat Completions choices[].delta"))
+				_ = writeSSEError(w, streamErr.Error())
+				return fail(streamErr)
 			}
-			thinkingText = detailsText.String()
+			continue // usage-only Chat Completions chunk
 		}
-		if value, ok := delta["reasoning_content"].(string); ok && value != "" {
-			thinkingText = value
-		} else if value, ok := delta["reasoning"].(string); ok && value != "" {
-			thinkingText = value
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
+				fmt.Errorf("invalid upstream stream response: choices[0] is not an object"))
+			_ = writeSSEError(w, streamErr.Error())
+			return fail(streamErr)
 		}
-		if thinkingText != "" || signature != "" {
-			thinkingIndex, err := startBlock("thinking", map[string]interface{}{"type": "thinking", "thinking": ""})
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			// Azure asynchronous content-filter annotations are valid Chat
+			// Completions chunks without a delta. They carry metadata only and
+			// must not terminate an otherwise healthy stream.
+			continue
+		}
+
+		for _, reasoningBlock := range converter.NormalizeReasoning(delta["reasoning_content"], delta["reasoning"], delta["reasoning_details"]) {
+			thinkingParts = append(thinkingParts, reasoningBlock.Text)
+			thinkingIndex, err := startBlock("thinking", reasoningBlock.Source, map[string]interface{}{"type": "thinking", "thinking": ""})
 			if err != nil {
 				return fail(err)
 			}
-			if thinkingText != "" {
-				if err := emit("content_block_delta", map[string]interface{}{
-					"type": "content_block_delta", "index": thinkingIndex,
-					"delta": map[string]interface{}{"type": "thinking_delta", "thinking": thinkingText},
-				}); err != nil {
-					return fail(err)
-				}
+			if err := emit("content_block_delta", map[string]interface{}{
+				"type": "content_block_delta", "index": thinkingIndex,
+				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": reasoningBlock.Text},
+			}); err != nil {
+				return fail(err)
 			}
-			if signature != "" {
+			if reasoningBlock.Signature != "" {
 				if err := emit("content_block_delta", map[string]interface{}{
 					"type": "content_block_delta", "index": thinkingIndex,
-					"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
+					"delta": map[string]interface{}{"type": "signature_delta", "signature": reasoningBlock.Signature},
 				}); err != nil {
 					return fail(err)
 				}
@@ -412,7 +414,8 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		}
 
 		if content, ok := delta["content"].(string); ok && content != "" {
-			textIndex, err := startBlock("text", map[string]interface{}{"type": "text", "text": ""})
+			textParts = append(textParts, content)
+			textIndex, err := startBlock("text", "text", map[string]interface{}{"type": "text", "text": ""})
 			if err != nil {
 				return fail(err)
 			}
@@ -490,7 +493,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 			_ = writeSSEError(w, streamErr.Error())
 			return fail(streamErr)
 		}
-		toolIndex, err := startBlock("tool", map[string]interface{}{
+		toolIndex, err := startBlock("tool", "tool", map[string]interface{}{
 			"type": "tool_use", "id": state.ID, "name": state.Name, "input": map[string]interface{}{},
 		})
 		if err != nil {
@@ -520,7 +523,22 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		fmt.Printf("[%s] [REQ] %s model=%s in=%d out=%d tok/s=%.1f\n", time.Now().Format("15:04:05"), cfg.OpenAIBaseURL, providerModel, inputTokens, outputTokens, tokensPerSec)
 	}
 	if cfg.Debug { fmt.Printf("[DEBUG] stream completed model=%s chunks=%d stop_reason=%s\n", providerModel, chunkCount, finalStopReason) }
-	return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData}
+	semanticTools := make([]map[string]string, 0, len(toolIndices))
+	for _, upstreamIndex := range toolIndices {
+		state := currentToolCalls[upstreamIndex]
+		semanticTools = append(semanticTools, map[string]string{
+			"id": state.ID, "name": state.Name, "arguments": strings.Join(state.ArgsFragments, ""),
+		})
+	}
+	semantic, _ := json.Marshal(map[string]interface{}{
+		"format":      "chat-completions-stream-normalized-v1",
+		"thinking":    strings.Join(thinkingParts, ""),
+		"content":     strings.Join(textParts, ""),
+		"tool_calls":  semanticTools,
+		"stop_reason": finalStopReason,
+		"usage":       usageData,
+	})
+	return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData, Semantic: semantic}
 }
 
 func usageInt(usage map[string]interface{}, name string) int {
@@ -643,6 +661,7 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	trace.setRequestBody(reqBody)
+	trace.capture(diagnostics.ContentBoundaryUpstreamRequest, attempt+1, reqBody)
 
 	// Build API URL
 	apiURL := cfg.ChatCompletionsURL()
@@ -740,6 +759,17 @@ func retryWithoutMaxCompletionTokens(ctx context.Context, req *models.OpenAIRequ
 	return callOpenAIInternal(ctx, &retryReq, cfg, trace, true)
 }
 
+func isResponsesPayload(payload map[string]interface{}) bool {
+	if object, _ := payload["object"].(string); object == "response" {
+		return true
+	}
+	if eventType, _ := payload["type"].(string); strings.HasPrefix(eventType, "response.") {
+		return true
+	}
+	_, hasOutput := payload["output"]
+	return hasOutput && payload["choices"] == nil
+}
+
 // callOpenAIInternal is the internal implementation without retry logic
 func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace, retry bool) (result *models.OpenAIResponse, err error) {
 	attempt := trace.beginAttempt(false, retry)
@@ -752,6 +782,7 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	trace.setRequestBody(reqBody)
+	trace.capture(diagnostics.ContentBoundaryUpstreamRequest, attempt+1, reqBody)
 
 	// Build API URL
 	apiURL := cfg.ChatCompletionsURL()
@@ -806,6 +837,19 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 	if err != nil {
 		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamRead,
 			fmt.Errorf("failed to read response: %w", err))
+	}
+	trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, respBody)
+
+	// Reject native Responses API payloads before decoding them as an empty Chat
+	// Completions response. Compatible providers must use /chat/completions.
+	var responsePayload map[string]interface{}
+	if err := json.Unmarshal(respBody, &responsePayload); err != nil {
+		return nil, diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
+			fmt.Errorf("failed to parse response: %w", err))
+	}
+	if isResponsesPayload(responsePayload) {
+		return nil, diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
+			fmt.Errorf("invalid upstream response: received Responses API payload; expected Chat Completions response with choices"))
 	}
 
 	// Parse response

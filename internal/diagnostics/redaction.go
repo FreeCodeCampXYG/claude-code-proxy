@@ -75,6 +75,56 @@ func RedactJSON(body []byte, options RedactionOptions) ([]byte, error) {
 	return result, nil
 }
 
+// RedactSecretsJSON preserves diagnostic content while removing credential values. It is
+// intentionally narrower than RedactJSON, which also removes conversational content.
+func RedactSecretsJSON(body []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("decode JSON for secret redaction: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("decode JSON for secret redaction: multiple JSON values")
+		}
+		return nil, fmt.Errorf("decode trailing JSON for secret redaction: %w", err)
+	}
+	return json.Marshal(redactSecrets(value))
+}
+
+func redactSecrets(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if _, secret := secretKeys[normalizeKey(key)]; secret {
+				result[key] = describeRedacted(child)
+				continue
+			}
+			result[key] = redactSecrets(child)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, child := range typed {
+			result[index] = redactSecrets(child)
+		}
+		return result
+	case string:
+		var nested any
+		if json.Unmarshal([]byte(typed), &nested) == nil {
+			if encoded, err := json.Marshal(redactSecrets(nested)); err == nil {
+				return string(encoded)
+			}
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
 func Redact(value any, options RedactionOptions) any {
 	if options.MaxDepth <= 0 {
 		options.MaxDepth = DefaultMaxRedactionDepth

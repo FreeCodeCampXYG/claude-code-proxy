@@ -50,17 +50,16 @@ type Tool struct {
 
 // OpenAIMessage represents a message in OpenAI format
 type OpenAIMessage struct {
-	Role             string           `json:"role"`
-	Content          interface{}      `json:"content,omitempty"` // string or null
-	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string           `json:"tool_call_id,omitempty"`
-	ReasoningDetails []interface{}    `json:"reasoning_details,omitempty"` // OpenRouter reasoning
-	// ReasoningContent carries prior assistant reasoning (Anthropic `thinking`
-	// blocks) on multi-turn tool-use messages. Moonshot AI / Kimi rejects
-	// assistant tool_call messages when thinking is enabled and reasoning_content
-	// is missing (error: "thinking is enabled but reasoning_content is missing
-	// in assistant tool call message").
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role       string           `json:"role"`
+	Content    interface{}      `json:"content,omitempty"` // string or null
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	// Providers return reasoning fields in incompatible string, object, and array
+	// shapes. Keep them untyped so optional provider fields cannot reject an
+	// otherwise valid Chat Completions response.
+	ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+	Reasoning        interface{} `json:"reasoning,omitempty"`
+	ReasoningDetails interface{} `json:"reasoning_details,omitempty"`
 }
 
 // OpenAIToolCall represents a tool call in OpenAI format

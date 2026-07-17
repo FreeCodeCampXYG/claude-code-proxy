@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+func TestRedactSecretsJSONRedactsStringifiedToolArguments(t *testing.T) {
+	encoded, err := RedactSecretsJSON([]byte(`{"tool_calls":[{"function":{"arguments":"{\"api_key\":\"sk-secret\",\"path\":\"safe.txt\"}"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "sk-secret") {
+		t.Fatalf("secret leaked from stringified arguments: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "safe.txt") || !strings.Contains(string(encoded), "redacted") {
+		t.Fatalf("arguments were not selectively scrubbed: %s", encoded)
+	}
+}
+
 func TestRedactJSONPreservesStructureAndRedactsValues(t *testing.T) {
 	input := []byte(`{
 		"model":"gpt-5",

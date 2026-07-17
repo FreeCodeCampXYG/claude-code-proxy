@@ -1,8 +1,8 @@
 package diagnostics
 
-const schemaVersion = 2
+const schemaVersion = 3
 
-const createSchemaV2SQL = `
+const createSchemaV3SQL = `
 CREATE TABLE diagnostics_events (
 	request_id TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL,
@@ -32,13 +32,28 @@ CREATE TABLE diagnostics_events (
 	truncated INTEGER NOT NULL DEFAULT 0,
 	task_hash TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE diagnostics_content (
+	request_id TEXT NOT NULL,
+	attempt_number INTEGER NOT NULL,
+	boundary TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	capture_mode TEXT NOT NULL,
+	content BLOB NOT NULL,
+	PRIMARY KEY (request_id, attempt_number, boundary),
+	FOREIGN KEY (request_id) REFERENCES diagnostics_events(request_id) ON DELETE CASCADE
+);
 CREATE INDEX idx_diagnostics_events_created_at
 	ON diagnostics_events(created_at DESC, request_id DESC);
 CREATE INDEX idx_diagnostics_events_model
 	ON diagnostics_events(model, created_at DESC);
 CREATE INDEX idx_diagnostics_events_task_hash
 	ON diagnostics_events(task_hash, created_at DESC);
-PRAGMA user_version = 2;
+CREATE INDEX idx_diagnostics_content_created_at
+	ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary);
+CREATE INDEX idx_diagnostics_content_expires_at
+	ON diagnostics_content(expires_at, request_id);
+PRAGMA user_version = 3;
 `
 
 var migrateV1ToV2Statements = []string{
@@ -57,4 +72,21 @@ var migrateV1ToV2Statements = []string{
 	`ALTER TABLE diagnostics_events ADD COLUMN task_hash TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_diagnostics_events_task_hash ON diagnostics_events(task_hash, created_at DESC)`,
 	`PRAGMA user_version = 2`,
+}
+
+var migrateV2ToV3Statements = []string{
+	`CREATE TABLE diagnostics_content (
+		request_id TEXT NOT NULL,
+		attempt_number INTEGER NOT NULL,
+		boundary TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		capture_mode TEXT NOT NULL,
+		content BLOB NOT NULL,
+		PRIMARY KEY (request_id, attempt_number, boundary),
+		FOREIGN KEY (request_id) REFERENCES diagnostics_events(request_id) ON DELETE CASCADE
+	)`,
+	`CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`,
+	`CREATE INDEX idx_diagnostics_content_expires_at ON diagnostics_content(expires_at, request_id)`,
+	`PRAGMA user_version = 3`,
 }

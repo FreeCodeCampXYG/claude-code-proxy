@@ -2,7 +2,9 @@ package diagnostics
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,23 +13,101 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
 
-const DefaultRetention = 72 * time.Hour
+const (
+	DefaultRetention             = 72 * time.Hour
+	DefaultContentRetention      = time.Hour
+	DefaultMaxContentBytes       = 64 * 1024
+	DefaultContentPreviewBytes   = 1024
+)
 
 type StoreOptions struct {
-	Retention   time.Duration
-	BusyTimeout time.Duration
-	Now         func() time.Time
+	Retention        time.Duration
+	ContentRetention time.Duration
+	CaptureContent   bool
+	BusyTimeout      time.Duration
+	Now              func() time.Time
 }
 
 type Store struct {
-	db        *sql.DB
-	retention time.Duration
-	now       func() time.Time
+	db               *sql.DB
+	retention        time.Duration
+	contentRetention time.Duration
+	captureContent   bool
+	now              func() time.Time
+	jobs             chan persistJob
+	stop             chan struct{}
+	worker           sync.WaitGroup
+	dropped          atomic.Uint64
+}
+
+type persistJob struct {
+	event    Event
+	captures []ContentCapture
+}
+
+// ContentCapture is an in-memory handoff to the diagnostics worker. It is
+// deliberately not persisted as-is: the worker removes secret values and
+// bounds the representation before writing SQLite.
+type ContentCapture struct {
+	RequestID     string
+	AttemptNumber int
+	Boundary      ContentBoundary
+	CreatedAt     time.Time
+	CaptureMode   ContentCaptureMode
+	Body          []byte
+}
+
+type ContentBoundary string
+
+const (
+	ContentBoundaryClaudeRequest  ContentBoundary = "claude_request"
+	ContentBoundaryUpstreamRequest ContentBoundary = "upstream_request"
+	ContentBoundaryUpstreamResponse ContentBoundary = "upstream_response"
+	ContentBoundaryClaudeResponse ContentBoundary = "claude_response"
+)
+
+type ContentCaptureMode string
+
+const (
+	ContentCaptureFull    ContentCaptureMode = "full"
+	ContentCaptureSummary ContentCaptureMode = "partial_summary"
+)
+
+type ContentSnapshot struct {
+	RequestID     string             `json:"request_id"`
+	AttemptNumber int                `json:"attempt_number"`
+	Boundary      ContentBoundary    `json:"boundary"`
+	CreatedAt     time.Time          `json:"created_at"`
+	ExpiresAt     time.Time          `json:"expires_at"`
+	CaptureMode   ContentCaptureMode `json:"capture_mode"`
+	Content       json.RawMessage    `json:"content"`
+}
+
+type ContentQuery struct {
+	RequestID     string
+	AttemptNumber *int
+	Boundary      ContentBoundary
+}
+
+type ContentRepresentationOptions struct {
+	MaxBytes     int
+	PreviewBytes int
+}
+
+type PartialJSONSummary struct {
+	Partial bool   `json:"partial"`
+	Size    int    `json:"size"`
+	SHA256  string `json:"sha256"`
+	Head    string `json:"head"`
+	Tail    string `json:"tail"`
 }
 
 type Event struct {
@@ -88,14 +168,16 @@ type EventSummary struct {
 }
 
 type Query struct {
-	RequestID string
-	Model     string
-	Provider  string
-	Since     time.Time
-	Until     time.Time
-	Limit     int
-	Offset    int
-	Ascending bool
+	RequestID       string
+	Model           string
+	Provider        string
+	CompletionState string
+	Streaming       *bool
+	Since           time.Time
+	Until           time.Time
+	Limit           int
+	Offset          int
+	Ascending       bool
 }
 
 type Analytics struct {
@@ -130,10 +212,12 @@ type AnalyticsCount struct {
 }
 
 type AnalyticsHour struct {
-	Hour    time.Time `json:"hour"`
-	Total   int       `json:"total"`
-	Success int       `json:"success"`
-	Failure int       `json:"failure"`
+	Hour         time.Time `json:"hour"`
+	Total        int       `json:"total"`
+	Success      int       `json:"success"`
+	Failure      int       `json:"failure"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
 }
 
 type TaskGroup struct {
@@ -165,9 +249,21 @@ func Open(path string, options StoreOptions) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db, retention: options.Retention, now: options.Now}
+	store := &Store{
+		db:               db,
+		retention:        options.Retention,
+		contentRetention: options.ContentRetention,
+		captureContent:   options.CaptureContent,
+		now:              options.Now,
+	}
 	if store.retention <= 0 {
 		store.retention = DefaultRetention
+	}
+	if store.contentRetention <= 0 {
+		store.contentRetention = DefaultContentRetention
+	}
+	if store.contentRetention > store.retention {
+		store.contentRetention = store.retention
 	}
 	if store.now == nil {
 		store.now = time.Now
@@ -176,6 +272,13 @@ func Open(path string, options StoreOptions) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if !store.captureContent {
+		if _, err := store.db.ExecContext(context.Background(), "DELETE FROM diagnostics_content"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("purge disabled diagnostics content: %w", err)
+		}
+	}
+	store.startWriter()
 	return store, nil
 }
 
@@ -191,6 +294,9 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 			return fmt.Errorf("enable diagnostics WAL mode: %w", err)
 		}
 	}
+	if _, err := store.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		return fmt.Errorf("enable diagnostics foreign keys: %w", err)
+	}
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read diagnostics schema version: %w", err)
@@ -200,31 +306,42 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 	}
 	switch version {
 	case 0:
-		if _, err := store.db.ExecContext(ctx, createSchemaV2SQL); err != nil {
+		if _, err := store.db.ExecContext(ctx, createSchemaV3SQL); err != nil {
 			return fmt.Errorf("create diagnostics schema: %w", err)
 		}
 	case 1:
-		tx, err := store.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin diagnostics schema migration: %w", err)
+		if err := store.migrate(ctx, migrateV1ToV2Statements, "v1 to v2"); err != nil {
+			return err
 		}
-		for _, statement := range migrateV1ToV2Statements {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("migrate diagnostics schema v1 to v2: %w", err)
-			}
+		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
+			return err
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit diagnostics schema migration: %w", err)
+	case 2:
+		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
+			return err
 		}
 	}
-	if err := store.validateAndRepairSchemaV2(ctx); err != nil {
-		return err
+	return store.validateAndRepairSchemaV3(ctx)
+}
+
+func (store *Store) migrate(ctx context.Context, statements []string, label string) error {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin diagnostics schema migration %s: %w", label, err)
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrate diagnostics schema %s: %w", label, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit diagnostics schema migration %s: %w", label, err)
 	}
 	return nil
 }
 
-var requiredSchemaV2Columns = []string{
+var requiredSchemaV3Columns = []string{
 	"request_id", "created_at", "updated_at", "method", "path", "provider", "model",
 	"status_code", "duration_ms", "streaming", "error", "request_body", "response_body", "metadata",
 	"attempt_count", "retry_count", "input_tokens", "output_tokens", "cache_read_input_tokens",
@@ -232,16 +349,17 @@ var requiredSchemaV2Columns = []string{
 	"canceled", "truncated", "task_hash",
 }
 
-var requiredSchemaV2Indexes = map[string]struct {
+var requiredSchemaV3Indexes = map[string]struct {
 	columns   []string
 	statement string
 }{
 	"idx_diagnostics_events_created_at": {columns: []string{"created_at", "request_id"}, statement: `CREATE INDEX idx_diagnostics_events_created_at ON diagnostics_events(created_at DESC, request_id DESC)`},
 	"idx_diagnostics_events_model":      {columns: []string{"model", "created_at"}, statement: `CREATE INDEX idx_diagnostics_events_model ON diagnostics_events(model, created_at DESC)`},
 	"idx_diagnostics_events_task_hash":  {columns: []string{"task_hash", "created_at"}, statement: `CREATE INDEX idx_diagnostics_events_task_hash ON diagnostics_events(task_hash, created_at DESC)`},
+	"idx_diagnostics_content_created_at": {columns: []string{"created_at", "request_id", "attempt_number", "boundary"}, statement: `CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`},
 }
 
-func (store *Store) validateAndRepairSchemaV2(ctx context.Context) error {
+func (store *Store) validateAndRepairSchemaV3(ctx context.Context) error {
 	rows, err := store.db.QueryContext(ctx, "PRAGMA table_info(diagnostics_events)")
 	if err != nil {
 		return fmt.Errorf("inspect diagnostics schema v2 columns: %w", err)
@@ -265,7 +383,7 @@ func (store *Store) validateAndRepairSchemaV2(ctx context.Context) error {
 		return fmt.Errorf("close diagnostics schema v2 column inspection: %w", err)
 	}
 	var missing []string
-	for _, name := range requiredSchemaV2Columns {
+	for _, name := range requiredSchemaV3Columns {
 		if !columns[name] {
 			missing = append(missing, name)
 		}
@@ -274,7 +392,7 @@ func (store *Store) validateAndRepairSchemaV2(ctx context.Context) error {
 		return fmt.Errorf("diagnostics schema v2 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
 	}
 
-	for name, required := range requiredSchemaV2Indexes {
+	for name, required := range requiredSchemaV3Indexes {
 		var found string
 		err := store.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&found)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -330,7 +448,100 @@ func (store *Store) Close() error {
 	if store == nil || store.db == nil {
 		return nil
 	}
+	if store.stop != nil {
+		close(store.stop)
+		store.worker.Wait()
+		store.stop = nil
+	}
 	return store.db.Close()
+}
+
+func (store *Store) startWriter() {
+	store.jobs = make(chan persistJob, 64)
+	store.stop = make(chan struct{})
+	store.worker.Add(1)
+	go func() {
+		defer store.worker.Done()
+		cleanupTicker := time.NewTicker(time.Minute)
+		defer cleanupTicker.Stop()
+		for {
+			select {
+			case job := <-store.jobs:
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				snapshots := store.prepareSnapshots(job.captures)
+				if err := store.insertBundle(ctx, job.event, snapshots); err != nil {
+					store.dropped.Add(1)
+				}
+				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
+					store.dropped.Add(1)
+				}
+				cancel()
+			case <-cleanupTicker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
+					store.dropped.Add(1)
+				}
+				cancel()
+			case <-store.stop:
+				return
+			}
+		}
+	}()
+}
+
+// Enqueue records a diagnostic bundle without waiting for SQLite. A full queue simply drops
+// the diagnostic record; callers must never let observability alter proxy behavior.
+func (store *Store) Enqueue(event Event, captures []ContentCapture) bool {
+	if store == nil || store.jobs == nil {
+		return false
+	}
+	job := persistJob{event: event, captures: append([]ContentCapture(nil), captures...)}
+	select {
+	case store.jobs <- job:
+		return true
+	default:
+		store.dropped.Add(1)
+		return false
+	}
+}
+
+func (store *Store) Dropped() uint64 {
+	if store == nil {
+		return 0
+	}
+	return store.dropped.Load()
+}
+
+func (store *Store) prepareSnapshots(captures []ContentCapture) []ContentSnapshot {
+	if !store.captureContent {
+		return nil
+	}
+	snapshots := make([]ContentSnapshot, 0, len(captures))
+	for _, capture := range captures {
+		if !validContentBoundary(capture.Boundary) || len(capture.Body) == 0 {
+			continue
+		}
+		safeBody, err := RedactSecretsJSON(capture.Body)
+		if err != nil {
+			continue
+		}
+		content, mode, err := RepresentJSONContent(safeBody, ContentRepresentationOptions{MaxBytes: DefaultMaxContentBytes})
+		if err != nil {
+			continue
+		}
+		if capture.CaptureMode == ContentCaptureSummary {
+			mode = ContentCaptureSummary
+		}
+		snapshots = append(snapshots, ContentSnapshot{
+			RequestID:     capture.RequestID,
+			AttemptNumber: capture.AttemptNumber,
+			Boundary:      capture.Boundary,
+			CreatedAt:     capture.CreatedAt,
+			CaptureMode:   mode,
+			Content:       content,
+		})
+	}
+	return snapshots
 }
 
 func (store *Store) Insert(ctx context.Context, event Event) error {
@@ -364,6 +575,164 @@ func (store *Store) Insert(ctx context.Context, event Event) error {
 	}
 	return nil
 }
+
+func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []ContentSnapshot) error {
+	if err := store.Insert(ctx, event); err != nil {
+		return err
+	}
+	for _, snapshot := range snapshots {
+		if err := store.InsertContent(ctx, snapshot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot) error {
+	if !store.captureContent {
+		return nil
+	}
+	if strings.TrimSpace(snapshot.RequestID) == "" {
+		return errors.New("diagnostics content request ID is required")
+	}
+	if snapshot.AttemptNumber < 0 {
+		return errors.New("diagnostics content attempt number must not be negative")
+	}
+	if !validContentBoundary(snapshot.Boundary) {
+		return fmt.Errorf("unsupported diagnostics content boundary %q", snapshot.Boundary)
+	}
+	if !json.Valid(snapshot.Content) {
+		return errors.New("diagnostics content must be valid JSON")
+	}
+	now := store.now().UTC()
+	if snapshot.CreatedAt.IsZero() {
+		snapshot.CreatedAt = now
+	}
+	if snapshot.ExpiresAt.IsZero() {
+		snapshot.ExpiresAt = snapshot.CreatedAt.Add(store.contentRetention)
+	}
+	if snapshot.ExpiresAt.After(snapshot.CreatedAt.Add(store.contentRetention)) {
+		snapshot.ExpiresAt = snapshot.CreatedAt.Add(store.contentRetention)
+	}
+	if snapshot.CaptureMode == "" {
+		snapshot.CaptureMode = ContentCaptureFull
+	}
+	if snapshot.CaptureMode != ContentCaptureFull && snapshot.CaptureMode != ContentCaptureSummary {
+		return fmt.Errorf("unsupported diagnostics content capture mode %q", snapshot.CaptureMode)
+	}
+	_, err := store.db.ExecContext(ctx, `
+		INSERT INTO diagnostics_content (request_id, attempt_number, boundary, created_at, expires_at, capture_mode, content)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(request_id, attempt_number, boundary) DO UPDATE SET
+			created_at=excluded.created_at, expires_at=excluded.expires_at, capture_mode=excluded.capture_mode, content=excluded.content`,
+		snapshot.RequestID, snapshot.AttemptNumber, snapshot.Boundary, toMillis(snapshot.CreatedAt),
+		toMillis(snapshot.ExpiresAt), snapshot.CaptureMode, []byte(snapshot.Content))
+	if err != nil {
+		return fmt.Errorf("insert diagnostics content request %q attempt %d boundary %q: %w", snapshot.RequestID, snapshot.AttemptNumber, snapshot.Boundary, err)
+	}
+	return nil
+}
+
+func (store *Store) Content(ctx context.Context, query ContentQuery) ([]ContentSnapshot, error) {
+	if strings.TrimSpace(query.RequestID) == "" {
+		return nil, errors.New("diagnostics content request ID is required")
+	}
+	if query.AttemptNumber != nil && *query.AttemptNumber < 0 {
+		return nil, errors.New("diagnostics content attempt number must not be negative")
+	}
+	if query.Boundary != "" && !validContentBoundary(query.Boundary) {
+		return nil, fmt.Errorf("unsupported diagnostics content boundary %q", query.Boundary)
+	}
+	statement := `SELECT request_id, attempt_number, boundary, created_at, expires_at, capture_mode, content
+		FROM diagnostics_content WHERE request_id = ? AND expires_at > ?`
+	args := []any{query.RequestID, toMillis(store.now().UTC())}
+	if query.AttemptNumber != nil {
+		statement += " AND attempt_number = ?"
+		args = append(args, *query.AttemptNumber)
+	}
+	if query.Boundary != "" {
+		statement += " AND boundary = ?"
+		args = append(args, query.Boundary)
+	}
+	statement += " ORDER BY attempt_number ASC, boundary ASC"
+	rows, err := store.db.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query diagnostics content: %w", err)
+	}
+	defer rows.Close()
+	var snapshots []ContentSnapshot
+	for rows.Next() {
+		var snapshot ContentSnapshot
+		var createdAt, expiresAt int64
+		var content []byte
+		if err := rows.Scan(&snapshot.RequestID, &snapshot.AttemptNumber, &snapshot.Boundary, &createdAt, &expiresAt, &snapshot.CaptureMode, &content); err != nil {
+			return nil, fmt.Errorf("scan diagnostics content: %w", err)
+		}
+		snapshot.CreatedAt, snapshot.ExpiresAt = fromMillis(createdAt), fromMillis(expiresAt)
+		snapshot.Content = cloneRaw(content)
+		snapshots = append(snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate diagnostics content: %w", err)
+	}
+	return snapshots, nil
+}
+
+func RepresentJSONContent(body []byte, options ContentRepresentationOptions) (json.RawMessage, ContentCaptureMode, error) {
+	if !json.Valid(body) {
+		return nil, "", errors.New("diagnostics content must be valid JSON")
+	}
+	maxBytes := options.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxContentBytes
+	}
+	if len(body) <= maxBytes {
+		return cloneRaw(body), ContentCaptureFull, nil
+	}
+	previewBytes := options.PreviewBytes
+	if previewBytes <= 0 {
+		previewBytes = DefaultContentPreviewBytes
+	}
+	previewBytes = minInt(previewBytes, len(body)/2)
+	sum := sha256.Sum256(body)
+	summary := PartialJSONSummary{
+		Partial: true,
+		Size:    len(body),
+		SHA256:  hex.EncodeToString(sum[:]),
+		Head:    utf8Head(body, previewBytes),
+		Tail:    utf8Tail(body, previewBytes),
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode diagnostics content summary: %w", err)
+	}
+	return encoded, ContentCaptureSummary, nil
+}
+
+func validContentBoundary(boundary ContentBoundary) bool {
+	switch boundary {
+	case ContentBoundaryClaudeRequest, ContentBoundaryUpstreamRequest, ContentBoundaryUpstreamResponse, ContentBoundaryClaudeResponse:
+		return true
+	default:
+		return false
+	}
+}
+
+func utf8Head(body []byte, limit int) string {
+	if limit >= len(body) { return string(body) }
+	end := limit
+	for end > 0 && !utf8.Valid(body[:end]) { end-- }
+	return string(body[:end])
+}
+
+func utf8Tail(body []byte, limit int) string {
+	if limit >= len(body) { return string(body) }
+	start := len(body) - limit
+	for start < len(body) && !utf8.Valid(body[start:]) { start++ }
+	return string(body[start:])
+}
+
+func minInt(left, right int) int { if left < right { return left }; return right }
 
 const eventColumns = `request_id, created_at, updated_at, method, path, provider, model,
 	status_code, duration_ms, streaming, error, request_body, response_body, metadata,
@@ -405,6 +774,15 @@ func (store *Store) Query(ctx context.Context, query Query) ([]EventSummary, err
 		return nil, fmt.Errorf("iterate diagnostics events: %w", err)
 	}
 	return events, nil
+}
+
+func (store *Store) Count(ctx context.Context, query Query) (int, error) {
+	where, args := buildWhere(query)
+	var total int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM diagnostics_events"+where, args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count diagnostics events: %w", err)
+	}
+	return total, nil
 }
 
 func (store *Store) Export(ctx context.Context, query Query, yield func(Event) error) error {
@@ -485,6 +863,8 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		bucket := hours[hour.Unix()]
 		if bucket == nil { bucket = &AnalyticsHour{Hour: hour}; hours[hour.Unix()] = bucket }
 		bucket.Total++
+		bucket.InputTokens += int64(event.InputTokens)
+		bucket.OutputTokens += int64(event.OutputTokens)
 		if success { bucket.Success++ } else { bucket.Failure++ }
 		if event.TaskHash == "" { result.TaskGroupingUnavailable++ } else { tasks[event.TaskHash]++ }
 	}
@@ -524,8 +904,14 @@ func (store *Store) Clear(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-func (store *Store) Cleanup(ctx context.Context) (int64, error) { return store.CleanupBefore(ctx, store.now().UTC().Add(-store.retention)) }
+func (store *Store) Cleanup(ctx context.Context) (int64, error) {
+	return store.CleanupBefore(ctx, store.now().UTC().Add(-store.retention))
+}
+
 func (store *Store) CleanupBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
+		return 0, fmt.Errorf("clean up diagnostics content: %w", err)
+	}
 	result, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_events WHERE created_at < ?", toMillis(cutoff))
 	if err != nil { return 0, fmt.Errorf("clean up diagnostics events: %w", err) }
 	count, err := result.RowsAffected()
@@ -539,6 +925,8 @@ func buildWhere(query Query) (string, []any) {
 	if query.RequestID != "" { clauses = append(clauses, "request_id = ?"); args = append(args, query.RequestID) }
 	if query.Model != "" { clauses = append(clauses, "model = ?"); args = append(args, query.Model) }
 	if query.Provider != "" { clauses = append(clauses, "provider = ?"); args = append(args, query.Provider) }
+	if query.CompletionState != "" { clauses = append(clauses, "completion_state = ?"); args = append(args, query.CompletionState) }
+	if query.Streaming != nil { clauses = append(clauses, "streaming = ?"); args = append(args, boolInt(*query.Streaming)) }
 	if !query.Since.IsZero() { clauses = append(clauses, "created_at >= ?"); args = append(args, toMillis(query.Since)) }
 	if !query.Until.IsZero() { clauses = append(clauses, "created_at <= ?"); args = append(args, toMillis(query.Until)) }
 	if len(clauses) == 0 { return "", args }
