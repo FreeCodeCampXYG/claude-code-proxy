@@ -683,6 +683,40 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 	return nil
 }
 
+func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event Event) error {
+	_, err := executor.ExecContext(ctx, `
+		INSERT INTO diagnostics_events (
+			request_id, created_at, updated_at, method, path, provider, model,
+			status_code, duration_ms, streaming, error, request_body, response_body, metadata,
+			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
+			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
+			canceled, truncated, api_key_label, task_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(request_id) DO UPDATE SET
+			created_at=excluded.created_at, updated_at=excluded.updated_at, method=excluded.method,
+			path=excluded.path, provider=excluded.provider, model=excluded.model,
+			status_code=excluded.status_code, duration_ms=excluded.duration_ms, streaming=excluded.streaming,
+			error=excluded.error, request_body=excluded.request_body, response_body=excluded.response_body,
+			metadata=excluded.metadata, attempt_count=excluded.attempt_count, retry_count=excluded.retry_count,
+			input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
+			cache_read_input_tokens=excluded.cache_read_input_tokens,
+			cache_creation_input_tokens=excluded.cache_creation_input_tokens, chunk_count=excluded.chunk_count,
+			stop_reason=excluded.stop_reason, completion_state=excluded.completion_state,
+			failure_kind=excluded.failure_kind, canceled=excluded.canceled, truncated=excluded.truncated,
+			api_key_label=excluded.api_key_label, task_hash=excluded.task_hash`,
+		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
+		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
+		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
+		nullableBytes(event.Metadata), event.AttemptCount, event.RetryCount, event.InputTokens,
+		event.OutputTokens, event.CacheReadInputTokens, event.CacheCreationInputTokens, event.ChunkCount,
+		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
+		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash)
+	if err != nil {
+		return fmt.Errorf("upsert diagnostics event %q: %w", event.RequestID, err)
+	}
+	return nil
+}
+
 func (store *Store) normalizeSnapshot(snapshot ContentSnapshot) (ContentSnapshot, error) {
 	if strings.TrimSpace(snapshot.RequestID) == "" {
 		return ContentSnapshot{}, errors.New("diagnostics content request ID is required")
@@ -758,7 +792,10 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 		return fmt.Errorf("begin diagnostics persistence transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if err := store.insertEvent(ctx, tx, event); err != nil {
+	if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
+		return fmt.Errorf("defer diagnostics content foreign keys: %w", err)
+	}
+	if err := store.upsertEvent(ctx, tx, event); err != nil {
 		return err
 	}
 	for _, snapshot := range normalized {

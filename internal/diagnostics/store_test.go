@@ -83,6 +83,21 @@ func TestStoreInsertBundleRollsBackEventWhenContentInsertFails(t *testing.T) {
 	}
 }
 
+func TestStoreInsertBundleDefersContentForeignKeysUntilCommit(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	if err := store.insertBundle(t.Context(), Event{RequestID: "deferred-bundle"}, []ContentSnapshot{{
+		RequestID: "deferred-bundle",
+		Boundary:  ContentBoundaryClaudeResponse,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}}); err != nil {
+		t.Fatalf("insertBundle() error = %v", err)
+	}
+	snapshots, err := store.Content(t.Context(), ContentQuery{RequestID: "deferred-bundle"})
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("Content() = %#v, %v", snapshots, err)
+	}
+}
+
 func TestStoreInsertBundlePersistsEventAndSnapshots(t *testing.T) {
 	store := openTestStore(t, StoreOptions{CaptureContent: true})
 	snapshots := []ContentSnapshot{
@@ -98,6 +113,28 @@ func TestStoreInsertBundlePersistsEventAndSnapshots(t *testing.T) {
 	stored, err := store.Content(t.Context(), ContentQuery{RequestID: "complete-bundle"})
 	if err != nil || len(stored) != len(snapshots) {
 		t.Fatalf("Content() = %#v, %v", stored, err)
+	}
+}
+
+func TestStoreInsertBundleUpsertsExistingEvent(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	if err := store.Insert(t.Context(), Event{RequestID: "existing-bundle", Model: "old-model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.insertBundle(t.Context(), Event{RequestID: "existing-bundle", Model: "new-model", StatusCode: 200}, []ContentSnapshot{{
+		RequestID: "existing-bundle",
+		Boundary:  ContentBoundaryClaudeResponse,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}}); err != nil {
+		t.Fatalf("insertBundle() error = %v", err)
+	}
+	event, err := store.Detail(t.Context(), "existing-bundle")
+	if err != nil || event.Model != "new-model" || event.StatusCode != 200 {
+		t.Fatalf("Detail() = %#v, %v", event, err)
+	}
+	snapshots, err := store.Content(t.Context(), ContentQuery{RequestID: "existing-bundle"})
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("Content() = %#v, %v", snapshots, err)
 	}
 }
 
