@@ -12,6 +12,7 @@
 - `go.mod` 使用 Go 1.24；GitHub Actions 负责安装 Go、测试和构建。
 - 标签发布工作流只有 [.github/workflows/go.yml](.github/workflows/go.yml)：Windows 测试和构建成功后，才进入 Ubuntu 的全平台发布。
 - `modernc.org/sqlite` 是纯 Go SQLite 驱动，不能切换为需要 CGO 的驱动，否则会破坏 Windows 发布构建。
+- Windows AMD64 EXE 图标在 CI 构建前由 `assets/windows/` 中的 ICO 和工作流固定版本的开源 `rsrc` 生成到包目录的 `rsrc_windows_amd64.syso`；构建必须针对 `./cmd/claude-code-proxy` 包而不是单独的 `main.go`，否则资源可能不会被链接。该 `.syso` 为 CI 临时构建产物，不提交到仓库；不需要 CGO、Windows SDK 或商业资源编译器。
 
 ## 2. 配置加载与 Provider 规则
 

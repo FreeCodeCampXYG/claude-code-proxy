@@ -46,7 +46,7 @@ A lightweight HTTP proxy that enables Claude Code to work with OpenAI-compatible
 go mod download
 
 # Build binary
-go build -o claude-code-proxy cmd/claude-code-proxy/main.go
+go build -o claude-code-proxy ./cmd/claude-code-proxy
 
 # Or use make
 make build
@@ -55,6 +55,8 @@ make build
 ### Install
 
 **Windows release (no Go required)**
+
+The Windows EXE includes a Waypoints-based application icon derived from [Lucide Icons](https://lucide.dev/) under the ISC License. It is an independent third-party proxy icon and is not a Claude Code or Anthropic mark.
 
 Download `claude-code-proxy-windows-amd64.exe` from the [latest release](https://github.com/nielspeter/claude-code-proxy/releases/latest), place it on your `PATH`, and run it directly. The release EXE is self-contained; Go is required only when building from source.
 
@@ -370,7 +372,7 @@ The proxy fully supports all Claude Code features:
 
 ```bash
 # Run in dev mode
-go run cmd/claude-code-proxy/main.go
+go run ./cmd/claude-code-proxy
 
 # Run tests
 go test ./...

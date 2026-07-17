@@ -2,7 +2,7 @@
 
 # Binary name
 BINARY=claude-code-proxy
-CMD_PATH=cmd/$(BINARY)/main.go
+CMD_PATH=./cmd/$(BINARY)
 
 # Build directory
 BUILD_DIR=dist

@@ -9,6 +9,7 @@ Use this template when preparing a new release.
 - [ ] Run full test suite: `go test ./...`
 - [ ] Run linter: `golangci-lint run`
 - [ ] Build for all platforms: `make build-all`
+- [ ] Verify the Windows EXE contains the application icon
 - [ ] Test the `ccp` wrapper locally
 - [ ] Update documentation if needed
 

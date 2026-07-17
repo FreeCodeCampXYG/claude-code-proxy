@@ -30,8 +30,17 @@ jobs:
     - name: Run tests
       run: go test ./...
 
+    - name: Generate Windows icon resource
+      shell: pwsh
+      run: |
+        go run github.com/akavel/rsrc@v0.10.2 -arch amd64 -ico assets/windows/claude-code-proxy.ico -o cmd/claude-code-proxy/rsrc_windows_amd64.syso
+
     - name: Build Windows binary
       run: go build -ldflags "-X github.com/claude-code-proxy/proxy/internal/server.ProxyVersion=${{ github.ref_name }}" -o claude-code-proxy.exe ./cmd/claude-code-proxy
+
+    - name: Verify Windows executable icon
+      shell: pwsh
+      run: ./scripts/verify-windows-icon.ps1 ./claude-code-proxy.exe
 
     - name: Smoke test Windows runtime diagnostics
       shell: pwsh
@@ -156,6 +165,9 @@ jobs:
 
     - name: Run tests
       run: go test -v ./...
+
+    - name: Generate Windows icon resource
+      run: go run github.com/akavel/rsrc@v0.10.2 -arch amd64 -ico assets/windows/claude-code-proxy.ico -o cmd/claude-code-proxy/rsrc_windows_amd64.syso
 
     - name: Build all platforms
       run: make VERSION=${{ github.ref_name }} build-all
