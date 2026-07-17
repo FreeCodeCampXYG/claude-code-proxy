@@ -144,7 +144,7 @@ func TestStoreClosePersistsAcceptedBundle(t *testing.T) {
 		Boundary:  ContentBoundaryClaudeRequest,
 		Body:      []byte(`{"safe":true}`),
 		SourceBytes: len(`{"safe":true}`),
-	}) {
+	}}) {
 		t.Fatal("Enqueue() = false")
 	}
 	if err := store.Close(); err != nil {
