@@ -122,7 +122,11 @@ jobs:
             throw "stream did not contain message_stop: $($response.Content)"
           }
 
-          $analytics = Invoke-RestMethod "http://127.0.0.1:18082/debug/logs/analytics" -TimeoutSec 5
+          $dashboard = Invoke-WebRequest "http://127.0.0.1:18082/debug/logs" -UseBasicParsing -TimeoutSec 5
+          $tokenMatch = [regex]::Match($dashboard.Content, 'window\.__diagnosticsToken="([^"]+)"')
+          if (-not $tokenMatch.Success) { throw "diagnostics dashboard did not provide a capability token" }
+          $diagnosticsHeaders = @{ "X-Diagnostics-Token" = $tokenMatch.Groups[1].Value }
+          $analytics = Invoke-RestMethod "http://127.0.0.1:18082/debug/logs/analytics" -Headers $diagnosticsHeaders -TimeoutSec 5
           if ([int]$analytics.total -lt 1) { throw "diagnostics analytics total was less than one: $($analytics | ConvertTo-Json -Compress)" }
           if ($health.diagnostics_enabled -ne $true) { throw "diagnostics were not enabled" }
         } finally {
