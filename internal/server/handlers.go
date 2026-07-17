@@ -65,6 +65,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	}
 
 	trace.capture(diagnostics.ContentBoundaryClaudeRequest, 0, c.Body())
+	trace.setClaudeRequestMetrics(c.Body(), claudeReq)
 
 	openaiReq, err := converter.ConvertRequest(claudeReq, cfg)
 	if err != nil {
@@ -117,9 +118,11 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	}
 	if encoded, marshalErr := json.Marshal(claudeResp); marshalErr == nil {
 		trace.capture(diagnostics.ContentBoundaryClaudeResponse, 0, encoded)
+		trace.setClaudeResponseBytes(len(encoded))
 	}
 	if encoded, marshalErr := json.Marshal(openaiResp); marshalErr == nil {
 		trace.setResponseBody(encoded)
+		trace.setUpstreamResponseBytes(len(encoded))
 	}
 	stopReason := ""
 	if len(openaiResp.Choices) > 0 && openaiResp.Choices[0].FinishReason != nil {
@@ -187,6 +190,8 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			"usage": outcome.Usage,
 		})
 		trace.setResponseBody(responseMetadata)
+		trace.setUpstreamResponseBytes(len(outcome.Semantic))
+		trace.setClaudeResponseBytes(len(outcome.Semantic))
 		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, 1, outcome.Semantic)
 		trace.capture(diagnostics.ContentBoundaryClaudeResponse, 0, outcome.Semantic)
 		inputTokens := usageInt(outcome.Usage, "input_tokens")
@@ -651,6 +656,7 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	trace.setRequestBody(reqBody)
+	trace.setUpstreamRequestMetrics(reqBody, len(req.Tools))
 	trace.capture(diagnostics.ContentBoundaryUpstreamRequest, attempt+1, reqBody)
 
 	// Build API URL
@@ -698,6 +704,7 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, diagnosticsBodyLimit+1))
 		_ = resp.Body.Close()
 		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, body)
+		trace.setUpstreamResponseBytes(len(body))
 		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamStatus,
 			newUpstreamStatusError(resp.StatusCode, body))
 	}
@@ -813,6 +820,7 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	trace.setRequestBody(reqBody)
+	trace.setUpstreamRequestMetrics(reqBody, len(req.Tools))
 	trace.capture(diagnostics.ContentBoundaryUpstreamRequest, attempt+1, reqBody)
 
 	// Build API URL
@@ -862,6 +870,7 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 				fmt.Errorf("failed to read error response: %w", readErr))
 		}
 		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, respBody)
+		trace.setUpstreamResponseBytes(len(respBody))
 		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamStatus,
 			newUpstreamStatusError(resp.StatusCode, respBody))
 	}
@@ -871,6 +880,7 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 			fmt.Errorf("failed to read response: %w", err))
 	}
 	trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, respBody)
+	trace.setUpstreamResponseBytes(len(respBody))
 
 	// Reject native Responses API payloads before decoding them as an empty Chat
 	// Completions response. Compatible providers must use /chat/completions.

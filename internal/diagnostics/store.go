@@ -151,8 +151,14 @@ type Event struct {
 	FailureKind     string          `json:"failure_kind,omitempty"`
 	Canceled        bool            `json:"canceled"`
 	Truncated       bool            `json:"truncated"`
-	APIKeyLabel    string          `json:"api_key_label,omitempty"`
-	TaskHash        string          `json:"task_hash,omitempty"`
+	APIKeyLabel              string          `json:"api_key_label,omitempty"`
+	TaskHash                 string          `json:"task_hash,omitempty"`
+	ClaudeRequestBytes       int             `json:"claude_request_bytes"`
+	UpstreamRequestBytes     int             `json:"upstream_request_bytes"`
+	UpstreamResponseBytes    int             `json:"upstream_response_bytes"`
+	ClaudeResponseBytes      int             `json:"claude_response_bytes"`
+	MessageCount             int             `json:"message_count"`
+	ToolCount                int             `json:"tool_count"`
 }
 
 type EventSummary struct {
@@ -179,8 +185,14 @@ type EventSummary struct {
 	FailureKind     string        `json:"failure_kind,omitempty"`
 	Canceled        bool          `json:"canceled"`
 	Truncated       bool          `json:"truncated"`
-	APIKeyLabel    string        `json:"api_key_label,omitempty"`
-	TaskHash        string        `json:"task_hash,omitempty"`
+	APIKeyLabel              string        `json:"api_key_label,omitempty"`
+	TaskHash                 string        `json:"task_hash,omitempty"`
+	ClaudeRequestBytes       int           `json:"claude_request_bytes"`
+	UpstreamRequestBytes     int           `json:"upstream_request_bytes"`
+	UpstreamResponseBytes    int           `json:"upstream_response_bytes"`
+	ClaudeResponseBytes      int           `json:"claude_response_bytes"`
+	MessageCount             int           `json:"message_count"`
+	ToolCount                int           `json:"tool_count"`
 }
 
 type Query struct {
@@ -212,8 +224,18 @@ type Analytics struct {
 	OutputTokens             int64            `json:"output_tokens"`
 	CacheReadInputTokens     int64            `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64            `json:"cache_creation_input_tokens"`
+	ClaudeRequestBytes       int64            `json:"claude_request_bytes"`
+	UpstreamRequestBytes     int64            `json:"upstream_request_bytes"`
+	UpstreamResponseBytes    int64            `json:"upstream_response_bytes"`
+	ClaudeResponseBytes      int64            `json:"claude_response_bytes"`
+	AverageClaudeRequestBytes float64         `json:"average_claude_request_bytes"`
+	AverageTotalTokens       float64          `json:"average_total_tokens"`
+	BytesPerInputToken       float64          `json:"bytes_per_input_token"`
+	BytesPerOutputToken      float64          `json:"bytes_per_output_token"`
 	AverageLatencyMS        float64          `json:"average_latency_ms"`
 	P95LatencyMS            int64            `json:"p95_latency_ms"`
+	TokenByteCorrelation    TokenByteCorrelation `json:"token_byte_correlation"`
+	ModelConsumption        []ModelConsumption   `json:"model_consumption"`
 	ByModel                 []AnalyticsCount `json:"by_model"`
 	ByProvider              []AnalyticsCount `json:"by_provider"`
 	ByAPIKey                []AnalyticsCount `json:"by_api_key"`
@@ -235,6 +257,33 @@ type AnalyticsHour struct {
 	Failure      int       `json:"failure"`
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
+	ClaudeRequestBytes int64 `json:"claude_request_bytes"`
+	UpstreamRequestBytes int64 `json:"upstream_request_bytes"`
+	UpstreamResponseBytes int64 `json:"upstream_response_bytes"`
+	ClaudeResponseBytes int64 `json:"claude_response_bytes"`
+}
+
+
+type TokenByteCorrelation struct {
+	SampleCount                 int     `json:"sample_count"`
+	InputTokenVsRequestBytes    float64 `json:"input_token_vs_request_bytes"`
+	OutputTokenVsResponseBytes  float64 `json:"output_token_vs_response_bytes"`
+	TotalTokenVsTotalBytes      float64 `json:"total_token_vs_total_bytes"`
+	Status                      string  `json:"status"`
+}
+
+type ModelConsumption struct {
+	Model                    string  `json:"model"`
+	Count                    int     `json:"count"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	TotalTokens              int64   `json:"total_tokens"`
+	ClaudeRequestBytes       int64   `json:"claude_request_bytes"`
+	UpstreamResponseBytes    int64   `json:"upstream_response_bytes"`
+	AverageLatencyMS         float64 `json:"average_latency_ms"`
+	BytesPerToken            float64 `json:"bytes_per_token"`
 }
 
 type TaskGroup struct {
@@ -324,7 +373,7 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 	}
 	switch version {
 	case 0:
-		if _, err := store.db.ExecContext(ctx, createSchemaV4SQL); err != nil {
+		if _, err := store.db.ExecContext(ctx, createSchemaV5SQL); err != nil {
 			return fmt.Errorf("create diagnostics schema: %w", err)
 		}
 	case 1:
@@ -337,6 +386,9 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
+			return err
+		}
 	case 2:
 		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
 			return err
@@ -344,12 +396,22 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
+			return err
+		}
 	case 3:
 		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
+			return err
+		}
+	case 4:
+		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
+			return err
+		}
 	}
-	return store.validateAndRepairSchemaV4(ctx)
+	return store.validateAndRepairSchemaV5(ctx)
 }
 
 func (store *Store) migrate(ctx context.Context, statements []string, label string) error {
@@ -369,15 +431,16 @@ func (store *Store) migrate(ctx context.Context, statements []string, label stri
 	return nil
 }
 
-var requiredSchemaV4Columns = []string{
+var requiredSchemaV5Columns = []string{
 	"request_id", "created_at", "updated_at", "method", "path", "provider", "model",
 	"status_code", "duration_ms", "streaming", "error", "request_body", "response_body", "metadata",
 	"attempt_count", "retry_count", "input_tokens", "output_tokens", "cache_read_input_tokens",
 	"cache_creation_input_tokens", "chunk_count", "stop_reason", "completion_state", "failure_kind",
-	"canceled", "truncated", "api_key_label", "task_hash",
+	"canceled", "truncated", "api_key_label", "task_hash", "claude_request_bytes",
+	"upstream_request_bytes", "upstream_response_bytes", "claude_response_bytes", "message_count", "tool_count",
 }
 
-var requiredSchemaV4Indexes = map[string]struct {
+var requiredSchemaV5Indexes = map[string]struct {
 	columns   []string
 	statement string
 }{
@@ -387,10 +450,10 @@ var requiredSchemaV4Indexes = map[string]struct {
 	"idx_diagnostics_content_created_at": {columns: []string{"created_at", "request_id", "attempt_number", "boundary"}, statement: `CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`},
 }
 
-func (store *Store) validateAndRepairSchemaV4(ctx context.Context) error {
+func (store *Store) validateAndRepairSchemaV5(ctx context.Context) error {
 	rows, err := store.db.QueryContext(ctx, "PRAGMA table_info(diagnostics_events)")
 	if err != nil {
-		return fmt.Errorf("inspect diagnostics schema v4 columns: %w", err)
+		return fmt.Errorf("inspect diagnostics schema v5 columns: %w", err)
 	}
 	columns := map[string]bool{}
 	for rows.Next() {
@@ -399,42 +462,42 @@ func (store *Store) validateAndRepairSchemaV4(ctx context.Context) error {
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan diagnostics schema v4 columns: %w", err)
+			return fmt.Errorf("scan diagnostics schema v5 columns: %w", err)
 		}
 		columns[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("iterate diagnostics schema v4 columns: %w", err)
+		return fmt.Errorf("iterate diagnostics schema v5 columns: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close diagnostics schema v4 column inspection: %w", err)
+		return fmt.Errorf("close diagnostics schema v5 column inspection: %w", err)
 	}
 	var missing []string
-	for _, name := range requiredSchemaV4Columns {
+	for _, name := range requiredSchemaV5Columns {
 		if !columns[name] {
 			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("diagnostics schema v4 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("diagnostics schema v5 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
 	}
 
-	for name, required := range requiredSchemaV4Indexes {
+	for name, required := range requiredSchemaV5Indexes {
 		var found string
 		err := store.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&found)
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, err := store.db.ExecContext(ctx, required.statement); err != nil {
-				return fmt.Errorf("repair diagnostics schema v4 index %s: %w", name, err)
+				return fmt.Errorf("repair diagnostics schema v5 index %s: %w", name, err)
 			}
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("inspect diagnostics schema v4 index %s: %w", name, err)
+			return fmt.Errorf("inspect diagnostics schema v5 index %s: %w", name, err)
 		}
 		indexRows, err := store.db.QueryContext(ctx, "PRAGMA index_info("+name+")")
 		if err != nil {
-			return fmt.Errorf("inspect diagnostics schema v4 index %s columns: %w", name, err)
+			return fmt.Errorf("inspect diagnostics schema v5 index %s columns: %w", name, err)
 		}
 		var actual []string
 		for indexRows.Next() {
@@ -442,19 +505,19 @@ func (store *Store) validateAndRepairSchemaV4(ctx context.Context) error {
 			var column string
 			if err := indexRows.Scan(&sequence, &cid, &column); err != nil {
 				_ = indexRows.Close()
-				return fmt.Errorf("scan diagnostics schema v4 index %s columns: %w", name, err)
+				return fmt.Errorf("scan diagnostics schema v5 index %s columns: %w", name, err)
 			}
 			actual = append(actual, column)
 		}
 		if err := indexRows.Err(); err != nil {
 			_ = indexRows.Close()
-			return fmt.Errorf("iterate diagnostics schema v4 index %s columns: %w", name, err)
+			return fmt.Errorf("iterate diagnostics schema v5 index %s columns: %w", name, err)
 		}
 		if err := indexRows.Close(); err != nil {
-			return fmt.Errorf("close diagnostics schema v4 index %s inspection: %w", name, err)
+			return fmt.Errorf("close diagnostics schema v5 index %s inspection: %w", name, err)
 		}
 		if !sameStrings(actual, required.columns) {
-			return fmt.Errorf("diagnostics schema v4 is incompatible: index %s has columns %v, want %v", name, actual, required.columns)
+			return fmt.Errorf("diagnostics schema v5 is incompatible: index %s has columns %v, want %v", name, actual, required.columns)
 		}
 	}
 	return nil
@@ -668,15 +731,18 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 			status_code, duration_ms, streaming, error, request_body, response_body, metadata,
 			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-			canceled, truncated, api_key_label, task_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
+			upstream_response_bytes, claude_response_bytes, message_count, tool_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
 		nullableBytes(event.Metadata), event.AttemptCount, event.RetryCount, event.InputTokens,
 		event.OutputTokens, event.CacheReadInputTokens, event.CacheCreationInputTokens, event.ChunkCount,
 		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
-		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash)
+		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
+		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
+		event.MessageCount, event.ToolCount)
 	if err != nil {
 		return fmt.Errorf("insert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -690,8 +756,9 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			status_code, duration_ms, streaming, error, request_body, response_body, metadata,
 			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-			canceled, truncated, api_key_label, task_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
+			upstream_response_bytes, claude_response_bytes, message_count, tool_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			created_at=excluded.created_at, updated_at=excluded.updated_at, method=excluded.method,
 			path=excluded.path, provider=excluded.provider, model=excluded.model,
@@ -703,14 +770,21 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			cache_creation_input_tokens=excluded.cache_creation_input_tokens, chunk_count=excluded.chunk_count,
 			stop_reason=excluded.stop_reason, completion_state=excluded.completion_state,
 			failure_kind=excluded.failure_kind, canceled=excluded.canceled, truncated=excluded.truncated,
-			api_key_label=excluded.api_key_label, task_hash=excluded.task_hash`,
+			api_key_label=excluded.api_key_label, task_hash=excluded.task_hash,
+			claude_request_bytes=excluded.claude_request_bytes,
+			upstream_request_bytes=excluded.upstream_request_bytes,
+			upstream_response_bytes=excluded.upstream_response_bytes,
+			claude_response_bytes=excluded.claude_response_bytes,
+			message_count=excluded.message_count, tool_count=excluded.tool_count`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
 		nullableBytes(event.Metadata), event.AttemptCount, event.RetryCount, event.InputTokens,
 		event.OutputTokens, event.CacheReadInputTokens, event.CacheCreationInputTokens, event.ChunkCount,
 		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
-		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash)
+		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
+		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
+		event.MessageCount, event.ToolCount)
 	if err != nil {
 		return fmt.Errorf("upsert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -787,11 +861,19 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 		}
 		normalized = append(normalized, snapshot)
 	}
+	if len(normalized) == 0 {
+		return store.upsertEvent(ctx, store.db, event)
+	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin diagnostics persistence transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
 		return fmt.Errorf("defer diagnostics content foreign keys: %w", err)
 	}
@@ -806,6 +888,7 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit diagnostics persistence transaction: %w", err)
 	}
+	committed = true
 	return nil
 }
 
@@ -942,12 +1025,14 @@ const eventColumns = `request_id, created_at, updated_at, method, path, provider
 	status_code, duration_ms, streaming, error, request_body, response_body, metadata,
 	attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 	cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-	canceled, truncated, api_key_label, task_hash`
+	canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
+	upstream_response_bytes, claude_response_bytes, message_count, tool_count`
 
 const summaryColumns = `request_id, created_at, updated_at, method, path, provider, model,
 	status_code, duration_ms, streaming, error, attempt_count, retry_count, input_tokens,
 	output_tokens, cache_read_input_tokens, cache_creation_input_tokens, chunk_count, stop_reason,
-	completion_state, failure_kind, canceled, truncated, api_key_label, task_hash`
+	completion_state, failure_kind, canceled, truncated, api_key_label, task_hash, claude_request_bytes,
+	upstream_request_bytes, upstream_response_bytes, claude_response_bytes, message_count, tool_count`
 
 func (store *Store) Detail(ctx context.Context, requestID string) (Event, error) {
 	return scanEvent(store.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM diagnostics_events WHERE request_id = ?", requestID))
@@ -1028,22 +1113,29 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		return Analytics{}, err
 	}
 	result := Analytics{
-		Since:             query.Since,
-		Until:             query.Until,
-		ByModel:           make([]AnalyticsCount, 0),
-		ByProvider:        make([]AnalyticsCount, 0),
-		ByAPIKey:          make([]AnalyticsCount, 0),
-		ByCompletionState: make([]AnalyticsCount, 0),
-		HourlyTimeline:    make([]AnalyticsHour, 0),
-		TaskGroups:        make([]TaskGroup, 0),
+		Since:                query.Since,
+		Until:                query.Until,
+		ByModel:              make([]AnalyticsCount, 0),
+		ByProvider:           make([]AnalyticsCount, 0),
+		ByAPIKey:             make([]AnalyticsCount, 0),
+		ByCompletionState:    make([]AnalyticsCount, 0),
+		HourlyTimeline:       make([]AnalyticsHour, 0),
+		ModelConsumption:     make([]ModelConsumption, 0),
+		TaskGroups:           make([]TaskGroup, 0),
+		TokenByteCorrelation: TokenByteCorrelation{Status: "insufficient_samples"},
 	}
 	models, providers, keys, states := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	hours, tasks := map[int64]*AnalyticsHour{}, map[string]int{}
+	modelConsumption := map[string]*ModelConsumption{}
+	modelLatencies := map[string]int64{}
 	latencies := make([]int64, 0, len(events))
+	inputTokens, requestBytes := make([]float64, 0, len(events)), make([]float64, 0, len(events))
+	outputTokens, responseBytes := make([]float64, 0, len(events)), make([]float64, 0, len(events))
+	totalTokensValues, totalBytesValues := make([]float64, 0, len(events)), make([]float64, 0, len(events))
 	var latencyTotal int64
 	for _, event := range events {
 		result.Total++
-			success := event.CompletionState == "completed" && event.StatusCode >= 200 && event.StatusCode < 400 && event.FailureKind == "" && !event.Canceled && !event.Truncated
+		success := event.CompletionState == "completed" && event.StatusCode >= 200 && event.StatusCode < 400 && event.FailureKind == "" && !event.Canceled && !event.Truncated
 		if success {
 			result.Success++
 		} else {
@@ -1058,10 +1150,15 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		result.OutputTokens += int64(event.OutputTokens)
 		result.CacheReadInputTokens += int64(event.CacheReadInputTokens)
 		result.CacheCreationInputTokens += int64(event.CacheCreationInputTokens)
+		result.ClaudeRequestBytes += int64(event.ClaudeRequestBytes)
+		result.UpstreamRequestBytes += int64(event.UpstreamRequestBytes)
+		result.UpstreamResponseBytes += int64(event.UpstreamResponseBytes)
+		result.ClaudeResponseBytes += int64(event.ClaudeResponseBytes)
 		latency := event.Duration.Milliseconds()
 		latencies = append(latencies, latency)
 		latencyTotal += latency
-		models[emptyLabel(event.Model)]++
+		modelName := emptyLabel(event.Model)
+		models[modelName]++
 		providers[emptyLabel(event.Provider)]++
 		keys[emptyLabel(event.APIKeyLabel)]++
 		states[emptyLabel(event.CompletionState)]++
@@ -1071,24 +1168,107 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		bucket.Total++
 		bucket.InputTokens += int64(event.InputTokens)
 		bucket.OutputTokens += int64(event.OutputTokens)
+		bucket.ClaudeRequestBytes += int64(event.ClaudeRequestBytes)
+		bucket.UpstreamRequestBytes += int64(event.UpstreamRequestBytes)
+		bucket.UpstreamResponseBytes += int64(event.UpstreamResponseBytes)
+		bucket.ClaudeResponseBytes += int64(event.ClaudeResponseBytes)
 		if success { bucket.Success++ } else { bucket.Failure++ }
 		if event.TaskHash == "" { result.TaskGroupingUnavailable++ } else { tasks[event.TaskHash]++ }
+		consumption := modelConsumption[modelName]
+		if consumption == nil { consumption = &ModelConsumption{Model: modelName}; modelConsumption[modelName] = consumption }
+		consumption.Count++
+		consumption.InputTokens += int64(event.InputTokens)
+		consumption.OutputTokens += int64(event.OutputTokens)
+		consumption.CacheReadInputTokens += int64(event.CacheReadInputTokens)
+		consumption.CacheCreationInputTokens += int64(event.CacheCreationInputTokens)
+		consumption.TotalTokens += int64(event.InputTokens + event.OutputTokens)
+		consumption.ClaudeRequestBytes += int64(event.ClaudeRequestBytes)
+		consumption.UpstreamResponseBytes += int64(event.UpstreamResponseBytes)
+		modelLatencies[modelName] += latency
+		inputTokens = append(inputTokens, float64(event.InputTokens))
+		requestBytes = append(requestBytes, float64(event.ClaudeRequestBytes))
+		outputTokens = append(outputTokens, float64(event.OutputTokens))
+		responseBytes = append(responseBytes, float64(event.UpstreamResponseBytes+event.ClaudeResponseBytes))
+		totalTokensValues = append(totalTokensValues, float64(event.InputTokens+event.OutputTokens))
+		totalBytesValues = append(totalBytesValues, float64(event.ClaudeRequestBytes+event.UpstreamRequestBytes+event.UpstreamResponseBytes+event.ClaudeResponseBytes))
 	}
 	if result.Total > 0 {
 		result.AverageAttempts = float64(result.Attempts) / float64(result.Total)
 		result.AverageLatencyMS = float64(latencyTotal) / float64(result.Total)
+		result.AverageClaudeRequestBytes = float64(result.ClaudeRequestBytes) / float64(result.Total)
+		result.AverageTotalTokens = float64(result.InputTokens+result.OutputTokens) / float64(result.Total)
+		result.BytesPerInputToken = ratio(result.ClaudeRequestBytes, result.InputTokens)
+		result.BytesPerOutputToken = ratio(result.UpstreamResponseBytes+result.ClaudeResponseBytes, result.OutputTokens)
 		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 		result.P95LatencyMS = latencies[int(math.Ceil(float64(len(latencies))*0.95))-1]
 	}
+	result.TokenByteCorrelation = tokenByteCorrelation(inputTokens, requestBytes, outputTokens, responseBytes, totalTokensValues, totalBytesValues)
 	result.ByModel = sortedCounts(models)
 	result.ByProvider = sortedCounts(providers)
 	result.ByAPIKey = sortedCounts(keys)
 	result.ByCompletionState = sortedCounts(states)
 	for _, bucket := range hours { result.HourlyTimeline = append(result.HourlyTimeline, *bucket) }
 	sort.Slice(result.HourlyTimeline, func(i, j int) bool { return result.HourlyTimeline[i].Hour.Before(result.HourlyTimeline[j].Hour) })
+	for _, consumption := range modelConsumption {
+		if consumption.Count > 0 {
+			consumption.AverageLatencyMS = float64(modelLatencies[consumption.Model]) / float64(consumption.Count)
+			consumption.BytesPerToken = ratio(consumption.ClaudeRequestBytes+consumption.UpstreamResponseBytes, consumption.TotalTokens)
+		}
+		result.ModelConsumption = append(result.ModelConsumption, *consumption)
+	}
+	sort.Slice(result.ModelConsumption, func(i, j int) bool { if result.ModelConsumption[i].TotalTokens == result.ModelConsumption[j].TotalTokens { return result.ModelConsumption[i].Model < result.ModelConsumption[j].Model }; return result.ModelConsumption[i].TotalTokens > result.ModelConsumption[j].TotalTokens })
 	for taskHash, count := range tasks { result.TaskGroups = append(result.TaskGroups, TaskGroup{TaskHash: taskHash, Count: count}) }
 	sort.Slice(result.TaskGroups, func(i, j int) bool { if result.TaskGroups[i].Count == result.TaskGroups[j].Count { return result.TaskGroups[i].TaskHash < result.TaskGroups[j].TaskHash }; return result.TaskGroups[i].Count > result.TaskGroups[j].Count })
 	return result, nil
+}
+
+func ratio(numerator, denominator int64) float64 {
+	if denominator == 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func tokenByteCorrelation(inputTokens, requestBytes, outputTokens, responseBytes, totalTokens, totalBytes []float64) TokenByteCorrelation {
+	result := TokenByteCorrelation{SampleCount: len(totalTokens), Status: "insufficient_samples"}
+	if len(totalTokens) < 2 {
+		return result
+	}
+	input, inputOK := pearson(inputTokens, requestBytes)
+	output, outputOK := pearson(outputTokens, responseBytes)
+	total, totalOK := pearson(totalTokens, totalBytes)
+	if !inputOK || !outputOK || !totalOK {
+		result.Status = "zero_variance"
+		return result
+	}
+	result.InputTokenVsRequestBytes = input
+	result.OutputTokenVsResponseBytes = output
+	result.TotalTokenVsTotalBytes = total
+	result.Status = "ok"
+	return result
+}
+
+func pearson(left, right []float64) (float64, bool) {
+	if len(left) != len(right) || len(left) < 2 {
+		return 0, false
+	}
+	var leftSum, rightSum float64
+	for index := range left {
+		leftSum += left[index]
+		rightSum += right[index]
+	}
+	leftMean, rightMean := leftSum/float64(len(left)), rightSum/float64(len(right))
+	var numerator, leftVariance, rightVariance float64
+	for index := range left {
+		leftDelta, rightDelta := left[index]-leftMean, right[index]-rightMean
+		numerator += leftDelta * rightDelta
+		leftVariance += leftDelta * leftDelta
+		rightVariance += rightDelta * rightDelta
+	}
+	if leftVariance == 0 || rightVariance == 0 {
+		return 0, false
+	}
+	return numerator / math.Sqrt(leftVariance*rightVariance), true
 }
 
 func normalizedBounds(query Query) (time.Time, time.Time) {
@@ -1159,7 +1339,9 @@ func scanEvent(source scanner) (Event, error) {
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &requestBody, &responseBody,
 		&metadata, &event.AttemptCount, &event.RetryCount, &event.InputTokens, &event.OutputTokens,
 		&event.CacheReadInputTokens, &event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason,
-		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash)
+		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
+		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
+		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount)
 	if err != nil { return Event{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
@@ -1176,7 +1358,9 @@ func scanSummary(source scanner) (EventSummary, error) {
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &event.AttemptCount,
 		&event.RetryCount, &event.InputTokens, &event.OutputTokens, &event.CacheReadInputTokens,
 		&event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason, &event.CompletionState,
-		&event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash)
+		&event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
+		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
+		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount)
 	if err != nil { return EventSummary{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0

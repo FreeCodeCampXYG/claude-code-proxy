@@ -12,7 +12,7 @@ Claude Code Proxy is an HTTP proxy that translates Claude API requests to OpenAI
 
 ```bash
 # Build the binary
-go build -o claude-code-proxy cmd/claude-code-proxy/main.go
+go build -o claude-code-proxy ./cmd/claude-code-proxy
 # Or use make
 make build
 
@@ -35,7 +35,7 @@ make test-coverage
 go fmt ./...
 
 # Compile and start proxy in simple log mode
-go build -o claude-code-proxy cmd/claude-code-proxy/main.go && ./claude-code-proxy -s
+go build -o claude-code-proxy ./cmd/claude-code-proxy && ./claude-code-proxy -s
 ```
 
 ## Architecture
@@ -234,7 +234,7 @@ To manually test the proxy with Claude Code CLI:
 
 ```bash
 # Build first
-go build -o claude-code-proxy cmd/claude-code-proxy/main.go
+go build -o claude-code-proxy ./cmd/claude-code-proxy
 
 # Start in simple log mode (recommended for testing)
 ./claude-code-proxy -s &

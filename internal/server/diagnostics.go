@@ -16,6 +16,7 @@ import (
 
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/claude-code-proxy/proxy/internal/diagnostics"
+	"github.com/claude-code-proxy/proxy/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -162,7 +163,55 @@ func (trace *diagnosticsTrace) setMalformedBody(body []byte, contentType string,
 	}
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
+	trace.event.ClaudeRequestBytes = len(body)
 	trace.metadata.Metadata = diagnostics.MalformedBodyJSON(body, contentType, parseErr)
+}
+
+func (trace *diagnosticsTrace) setClaudeRequestMetrics(body []byte, request models.ClaudeRequest) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.ClaudeRequestBytes = len(body)
+	trace.event.MessageCount = len(request.Messages)
+}
+
+func (trace *diagnosticsTrace) setUpstreamRequestMetrics(body []byte, toolCount int) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.UpstreamRequestBytes = len(body)
+	trace.event.ToolCount = toolCount
+}
+
+func (trace *diagnosticsTrace) setUpstreamResponseBytes(size int) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.UpstreamResponseBytes = size
+}
+
+func (trace *diagnosticsTrace) setClaudeResponseBytes(size int) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.ClaudeResponseBytes = size
+}
+
+func (trace *diagnosticsTrace) addClaudeResponseBytes(size int) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.ClaudeResponseBytes += size
 }
 
 func (trace *diagnosticsTrace) setRequestBody(body []byte) {

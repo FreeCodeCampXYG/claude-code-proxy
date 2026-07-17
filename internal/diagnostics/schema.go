@@ -1,8 +1,8 @@
 package diagnostics
 
-const schemaVersion = 4
+const schemaVersion = 5
 
-const createSchemaV4SQL = `
+const createSchemaV5SQL = `
 CREATE TABLE diagnostics_events (
 	request_id TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL,
@@ -31,7 +31,13 @@ CREATE TABLE diagnostics_events (
 	canceled INTEGER NOT NULL DEFAULT 0,
 	truncated INTEGER NOT NULL DEFAULT 0,
 	api_key_label TEXT NOT NULL DEFAULT '',
-	task_hash TEXT NOT NULL DEFAULT ''
+	task_hash TEXT NOT NULL DEFAULT '',
+	claude_request_bytes INTEGER NOT NULL DEFAULT 0,
+	upstream_request_bytes INTEGER NOT NULL DEFAULT 0,
+	upstream_response_bytes INTEGER NOT NULL DEFAULT 0,
+	claude_response_bytes INTEGER NOT NULL DEFAULT 0,
+	message_count INTEGER NOT NULL DEFAULT 0,
+	tool_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE diagnostics_content (
 	request_id TEXT NOT NULL,
@@ -54,7 +60,7 @@ CREATE INDEX idx_diagnostics_content_created_at
 	ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary);
 CREATE INDEX idx_diagnostics_content_expires_at
 	ON diagnostics_content(expires_at, request_id);
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 `
 
 var migrateV1ToV2Statements = []string{
@@ -95,4 +101,14 @@ var migrateV2ToV3Statements = []string{
 var migrateV3ToV4Statements = []string{
 	`ALTER TABLE diagnostics_events ADD COLUMN api_key_label TEXT NOT NULL DEFAULT ''`,
 	`PRAGMA user_version = 4`,
+}
+
+var migrateV4ToV5Statements = []string{
+	`ALTER TABLE diagnostics_events ADD COLUMN claude_request_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN upstream_request_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN upstream_response_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN claude_response_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN tool_count INTEGER NOT NULL DEFAULT 0`,
+	`PRAGMA user_version = 5`,
 }
