@@ -419,8 +419,7 @@ func TestCorrelationProbeStoresOnlyNamesAndPresence(t *testing.T) {
 	req.Header.Set("x-anthropic-billing-header", "cost_center=secret-cost; safe-key=secret-safe; invalid key=secret-invalid; bare-secret")
 	resp, err := app.Test(req)
 	if err != nil { t.Fatal(err) }
-	event, err := store.Detail(t.Context(), resp.Header.Get("X-Request-ID"))
-	if err != nil { t.Fatal(err) }
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
 	metadata := string(event.Metadata)
 	if strings.Contains(metadata, "secret-session-value") || strings.Contains(metadata, "secret-parent-value") || strings.Contains(metadata, "secret-cost") || strings.Contains(metadata, "secret-safe") || strings.Contains(metadata, "secret-invalid") || strings.Contains(metadata, "bare-secret") {
 		t.Fatalf("correlation values leaked: %s", metadata)
