@@ -7,14 +7,14 @@ import (
 )
 
 func TestRedactSecretsJSONRedactsStringifiedToolArguments(t *testing.T) {
-	encoded, err := RedactSecretsJSON([]byte(`{"tool_calls":[{"function":{"arguments":"{\"api_key\":\"sk-secret\",\"path\":\"safe.txt\"}"}}]}`))
+	encoded, err := RedactSecretsJSON([]byte(`{"tool_calls":[{"function":{"arguments":"{\"api_key\":\"sk-secret\",\"path\":\"C:\\\\work\\\\private\\\\safe.txt\",\"workspace\":\"\\\\\\\\server\\\\share\\\\repo\"}"}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "sk-secret") {
-		t.Fatalf("secret leaked from stringified arguments: %s", encoded)
+	if strings.Contains(string(encoded), "sk-secret") || strings.Contains(string(encoded), "C:\\work") || strings.Contains(string(encoded), "server\\share") {
+		t.Fatalf("secret or path leaked from stringified arguments: %s", encoded)
 	}
-	if !strings.Contains(string(encoded), "safe.txt") || !strings.Contains(string(encoded), "redacted") {
+	if !strings.Contains(string(encoded), "safe.txt") || !strings.Contains(string(encoded), "repo") || !strings.Contains(string(encoded), "redacted") {
 		t.Fatalf("arguments were not selectively scrubbed: %s", encoded)
 	}
 }
@@ -104,8 +104,7 @@ func assertDescriptor(t *testing.T, descriptor map[string]any, wantType string, 
 	if descriptor["redacted"] != true || descriptor["type"] != wantType || descriptor["length"] != float64(wantLength) {
 		t.Fatalf("unexpected redaction descriptor: %#v", descriptor)
 	}
-	hash, _ := descriptor["sha256"].(string)
-	if len(hash) != 64 {
-		t.Fatalf("expected SHA-256 hash, got %q", hash)
+	if _, exists := descriptor["sha256"]; exists {
+		t.Fatalf("redaction descriptor must not expose a hash: %#v", descriptor)
 	}
 }

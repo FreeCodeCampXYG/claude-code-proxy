@@ -27,6 +27,7 @@ NewAPI（例如自建域名或本机 NewAPI）必须显式配置：
 OPENAI_BASE_URL=https://your-newapi.example/v1
 OPENAI_PROVIDER=newapi
 OPENAI_API_KEY=your-newapi-key
+# 多账号手动选择：改用 OPENAI_API_KEYS=key-one,key-two，并设置 OPENAI_API_KEY_INDEX=1 或 2；切换后重启代理。
 ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6
 ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6
 ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6
@@ -96,19 +97,19 @@ C:\Users\<用户名>\AppData\Local\claude-code-proxy\diagnostics.db
 - thinking / reasoning 正文；
 - 原始 SSE 流分块。
 
-默认可保存且应继续保持的内容包括：模型、provider、状态码、请求 ID、耗时、重试次数、字段是否存在、消息/工具数量、类型/长度/哈希、token usage、受限错误摘要及脱敏 JSON 结构。
+默认可保存且应继续保持的内容包括：模型、provider、状态码、请求 ID、耗时、重试次数、字段是否存在、消息/工具数量、类型/长度、token usage、受限错误摘要及脱敏 JSON 结构。
 
 ### 显式本机内容抓取
 
 只有同时配置 `DIAGNOSTICS_ENABLED=true` 和 `DIAGNOSTICS_CAPTURE_CONTENT=true` 时，才允许为本机排障短期保存内容快照；`-d` 只开启脱敏诊断，**不得**自动开启内容抓取。该选项保存的是入站 Claude 请求、实际发送的转换后上游请求、上游响应与回给 Claude Code 的响应四个边界。非流式仅保存有界的有效 JSON；流式仅保存归并后的语义内容，绝不保存可重放的原始 SSE 帧。
 
-- 单份快照必须有严格大小上限；超长的有效 JSON 只能保存带完整长度/哈希及明确截断标记的受限摘要，malformed 内容仍只保存长度、SHA-256 与解析错误；
+- 单份快照必须有严格大小上限；超长的有效 JSON 在完成脱敏和路径清理后只能保存首尾文本摘录、完整源字节长度、明确截断原因和省略字符数；malformed 内容仍只保存长度与解析错误；
 - 不得保存请求头、API key、`Authorization`、Cookie；内容数据库/文件未加密，短期保留，且内容不进入列表、分析、普通详情或 NDJSON 导出；
 - 内容接口仅供受保护的 loopback 诊断页面按需读取；
 - 诊断是旁路能力：队列满、SQLite 繁忙或快照失败时，只允许丢弃诊断数据并输出脱敏告警，绝不阻塞、延迟或改变代理请求、重试、SSE 写入、取消与错误语义。
 
 - 诊断请求 ID 由服务端重新生成，并回传给 Claude 客户端，同时以 `X-Request-ID` 转发上游；不信任客户端自带 ID。
-- malformed JSON 只保存长度、SHA-256 与解析错误，不保存原文。
+- malformed JSON 只保存长度与解析错误，不保存原文。
 - 测试中 `TestHandleMessagesMalformedBodyStoresMetadataOnly` 会故意制造 JSON 解析错误。控制台出现 `unexpected end of JSON input` 但测试显示 `PASS` 时，不是构建失败。
 - SQLite 必须直接使用原生 Windows 文件路径：`sql.Open("sqlite", path)`。不要把 `C:\\...` 转成 `file://C:/...` URI；这会导致 Windows `modernc.org/sqlite` 初始化失败。
 - 测试数据库使用 `t.TempDir()` 的系统临时目录，而非仓库目录，测试结束后由 Go 自动删除。

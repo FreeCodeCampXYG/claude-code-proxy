@@ -1,8 +1,8 @@
 package diagnostics
 
-const schemaVersion = 3
+const schemaVersion = 4
 
-const createSchemaV3SQL = `
+const createSchemaV4SQL = `
 CREATE TABLE diagnostics_events (
 	request_id TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL,
@@ -30,6 +30,7 @@ CREATE TABLE diagnostics_events (
 	failure_kind TEXT NOT NULL DEFAULT '',
 	canceled INTEGER NOT NULL DEFAULT 0,
 	truncated INTEGER NOT NULL DEFAULT 0,
+	api_key_label TEXT NOT NULL DEFAULT '',
 	task_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE diagnostics_content (
@@ -53,7 +54,7 @@ CREATE INDEX idx_diagnostics_content_created_at
 	ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary);
 CREATE INDEX idx_diagnostics_content_expires_at
 	ON diagnostics_content(expires_at, request_id);
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 `
 
 var migrateV1ToV2Statements = []string{
@@ -89,4 +90,9 @@ var migrateV2ToV3Statements = []string{
 	`CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`,
 	`CREATE INDEX idx_diagnostics_content_expires_at ON diagnostics_content(expires_at, request_id)`,
 	`PRAGMA user_version = 3`,
+}
+
+var migrateV3ToV4Statements = []string{
+	`ALTER TABLE diagnostics_events ADD COLUMN api_key_label TEXT NOT NULL DEFAULT ''`,
+	`PRAGMA user_version = 4`,
 }

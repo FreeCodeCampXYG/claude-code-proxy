@@ -83,6 +83,57 @@ func TestHandleMessagesCapturesAllContentBoundariesOnlyWhenEnabled(t *testing.T)
 	}
 }
 
+func TestHandleMessagesCapturesFailedUpstreamResponseWithoutRetryingContextError(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"input exceeds context window for max_completion_tokens"}}`)
+	}))
+	defer upstream.Close()
+
+	store, err := diagnostics.Open(filepath.Join(t.TempDir(), "failure-content.db"), diagnostics.StoreOptions{CaptureContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key", DiagnosticsCaptureContent: true}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusBadGateway || calls != 1 {
+		t.Fatalf("status=%d upstream calls=%d, want 502 and one call", resp.StatusCode, calls)
+	}
+	requestID := resp.Header.Get("X-Request-ID")
+	event := awaitDiagnosticEvent(t, store, requestID)
+	if event.AttemptCount != 1 || event.RetryCount != 0 {
+		t.Fatalf("context-window diagnostics retried: %#v", event)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshots, contentErr := store.Content(t.Context(), diagnostics.ContentQuery{RequestID: requestID})
+		for _, snapshot := range snapshots {
+			if snapshot.Boundary == diagnostics.ContentBoundaryUpstreamResponse {
+				return
+			}
+		}
+		if contentErr != nil {
+			t.Fatal(contentErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("missing captured upstream error response")
+}
+
 func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -394,8 +445,8 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	// graceful paging fallback, SVG chart, query controls, and textContent-only
 	// rendering are all part of the local-page contract.
 	for _, required := range []string{
-		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "筛选请求", "请求主从视图", "请求列表", "请求详情", "脱敏 JSON", "本地内容", "确定要删除所有诊断记录吗？", "已完成",
-		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=100", "eventsParams.set('limit',String(pageSize))", "eventsParams.set('offset',String(requestedOffset))", "const requestedOffset=offset", "offset!==requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':String(value)}", "breakdown('models',analytics.by_model||[],localized)", "breakdown('providers',analytics.by_provider||[],localized)", "completion_state", "request_id", "window.__diagnosticsToken", "X-Diagnostics-Token", "/debug/logs/'+encodeURIComponent(selectedID)+'/content", "page.total", "总数暂不可用", "createElementNS('http://www.w3.org/2000/svg'", "输入与输出令牌趋势", "textContent", "/debug/logs/analytics",
+		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "筛选请求", "请求主从视图", "请求列表", "请求详情", "显示原始记录 JSON", "本地内容", "确定要删除所有诊断记录吗？", "已完成",
+		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", "pageSize=50", "API 密钥", "by_api_key", "breakdown('apiKeys',analytics.by_api_key||[],localized)", "eventsParams.set('limit',String(pageSize))", "eventsParams.set('offset',String(requestedOffset))", "const requestedOffset=offset", "offset!==requestedOffset", "function localized(value){return value==='unavailable'||!value?'不可用':String(value)}", "breakdown('models',analytics.by_model||[],localized)", "breakdown('providers',analytics.by_provider||[],localized)", "completion_state", "request_id", "window.__diagnosticsToken", "X-Diagnostics-Token", "/debug/logs/'+encodeURIComponent(selectedID)+'/content", "page.total", "总数暂不可用", "createElementNS('http://www.w3.org/2000/svg'", "输入与输出令牌趋势", "textContent", "/debug/logs/analytics",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("dashboard missing %q", required)

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -80,8 +81,8 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	streaming := openaiReq.Stream != nil && *openaiReq.Stream
 	trace.setModel(openaiReq.Model, streaming)
 	if cfg.Debug {
-		fmt.Printf("[DEBUG] request_id=%s provider=%s model=%s streaming=%t tools=%d\n",
-			c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, streaming, len(openaiReq.Tools))
+		fmt.Printf("[DEBUG] request_id=%s provider=%s model=%s key_label=%s streaming=%t tools=%d\n",
+			c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, cfg.OpenAIAPIKeyLabel, streaming, len(openaiReq.Tools))
 	}
 
 	if streaming {
@@ -93,6 +94,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	if err != nil {
 		trace.setResponseBody([]byte(errorJSON(err)))
 		trace.finish(fiber.StatusBadGateway, err)
+		logUpstreamFailure(trace, cfg, openaiReq.Model, false, err)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
@@ -139,8 +141,8 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 			tokensPerSec = float64(claudeResp.Usage.OutputTokens) / duration
 		}
 		timestamp := time.Now().Format("15:04:05")
-		fmt.Printf("[%s] [REQ] %s model=%s in=%d out=%d tok/s=%.1f\n",
-			timestamp, cfg.OpenAIBaseURL, openaiReq.Model, claudeResp.Usage.InputTokens,
+		fmt.Printf("[%s] [REQ] %s model=%s key_label=%s in=%d out=%d tok/s=%.1f\n",
+			timestamp, cfg.OpenAIBaseURL, openaiReq.Model, cfg.OpenAIAPIKeyLabel, claudeResp.Usage.InputTokens,
 			claudeResp.Usage.OutputTokens, tokensPerSec)
 	}
 
@@ -172,6 +174,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			_ = writeSSEError(w, fmt.Sprintf("streaming request failed: %v", err))
 			trace.setResponseBody([]byte(errorJSON(err)))
 			trace.finish(fiber.StatusBadGateway, err)
+			logUpstreamFailure(trace, cfg, openaiReq.Model, true, err)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -573,15 +576,12 @@ func writeSSEError(w *bufio.Writer, message string) error {
 func callOpenAI(ctx context.Context, req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*models.OpenAIResponse, error) {
 	resp, err := callOpenAIInternal(ctx, req, cfg, trace, false)
 	if err != nil {
-		// Check if this is a max_tokens parameter error
-		if isMaxTokensParameterError(err.Error()) {
+		if isUnsupportedMaxTokensParameter(err, req) {
 			if cfg.Debug {
-				fmt.Printf("[DEBUG] Detected max_completion_tokens parameter error for model %s, retrying without it\n", req.Model)
+				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter for model %s, retrying without it\n", req.Model)
 			}
-			// Retry without max_completion_tokens and cache the capability per model
 			return retryWithoutMaxCompletionTokens(ctx, req, cfg, trace)
 		}
-		// Other errors - return as-is
 		return nil, err
 	}
 
@@ -608,25 +608,15 @@ func callOpenAI(ctx context.Context, req *models.OpenAIRequest, cfg *config.Conf
 func callOpenAIStream(ctx context.Context, req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*http.Response, error) {
 	resp, err := callOpenAIStreamInternal(ctx, req, cfg, trace, false)
 	if err != nil {
-		// Check if this is a max_tokens parameter error
-		if isMaxTokensParameterError(err.Error()) {
+		if isUnsupportedMaxTokensParameter(err, req) {
 			if cfg.Debug {
-				fmt.Printf("[DEBUG] Detected max_completion_tokens parameter error in stream for model %s, retrying without it\n", req.Model)
+				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter in stream for model %s, retrying without it\n", req.Model)
 			}
-			// Create retry request without max tokens
 			retryReq := *req
 			retryReq.MaxCompletionTokens = 0
 			retryReq.MaxTokens = 0
-
-			// Cache that this (provider, model) doesn't support max_completion_tokens
-			cacheKey := config.CacheKey{
-				BaseURL: cfg.OpenAIBaseURL,
-				Model:   req.Model,
-			}
-			config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{
-				UsesMaxCompletionTokens: false,
-			})
-
+			cacheKey := config.CacheKey{BaseURL: cfg.OpenAIBaseURL, Model: req.Model}
+			config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{UsesMaxCompletionTokens: false})
 			return callOpenAIStreamInternal(ctx, &retryReq, cfg, trace, true)
 		}
 		return nil, err
@@ -707,31 +697,72 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, diagnosticsBodyLimit+1))
 		_ = resp.Body.Close()
+		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, body)
 		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamStatus,
-			fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, boundedUpstreamText(body)))
+			newUpstreamStatusError(resp.StatusCode, body))
 	}
 
 	return resp, nil
 }
 
-// isMaxTokensParameterError checks if the error message indicates an unsupported
-// max_tokens or max_completion_tokens parameter issue.
-// Uses broad keyword matching to handle different error message formats across providers.
-// No status code checking - relies on message content alone.
-func isMaxTokensParameterError(errorMessage string) bool {
-	errorLower := strings.ToLower(errorMessage)
+type upstreamStatusError struct {
+	StatusCode int
+	Body       []byte
+	Message    string
+}
 
-	// Check for parameter error indicators
-	hasParamIndicator := strings.Contains(errorLower, "parameter") ||
-		strings.Contains(errorLower, "unsupported") ||
-		strings.Contains(errorLower, "invalid")
+func (err *upstreamStatusError) Error() string {
+	return fmt.Sprintf("OpenAI API returned status %d: %s", err.StatusCode, err.Message)
+}
 
-	// Check for our specific parameter names
-	hasOurParam := strings.Contains(errorLower, "max_tokens") ||
-		strings.Contains(errorLower, "max_completion_tokens")
+func newUpstreamStatusError(statusCode int, body []byte) *upstreamStatusError {
+	return &upstreamStatusError{
+		StatusCode: statusCode,
+		Body:       append([]byte(nil), body...),
+		Message:    boundedUpstreamText(body),
+	}
+}
 
-	// Require both indicators to reduce false positives
-	return hasParamIndicator && hasOurParam
+// isUnsupportedMaxTokensParameter only adapts a model capability after a provider
+// explicitly rejects one of the token-limit fields in a validation response.
+func isUnsupportedMaxTokensParameter(err error, req *models.OpenAIRequest) bool {
+	if req == nil || (req.MaxCompletionTokens <= 0 && req.MaxTokens <= 0) {
+		return false
+	}
+	var statusErr *upstreamStatusError
+	if !errors.As(err, &statusErr) || (statusErr.StatusCode != http.StatusBadRequest && statusErr.StatusCode != http.StatusUnprocessableEntity) {
+		return false
+	}
+
+	var payload struct {
+		Error struct {
+			Param   string `json:"param"`
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(statusErr.Body, &payload) == nil && isMaxTokensParameterName(payload.Error.Param) {
+		return explicitlyUnsupportedParameter(payload.Error.Message, payload.Error.Code)
+	}
+
+	body := strings.ToLower(string(statusErr.Body))
+	return (strings.Contains(body, "parameter max_completion_tokens") ||
+		strings.Contains(body, "parameter 'max_completion_tokens'") ||
+		strings.Contains(body, "parameter \"max_completion_tokens\"") ||
+		strings.Contains(body, "parameter max_tokens") ||
+		strings.Contains(body, "parameter 'max_tokens'") ||
+		strings.Contains(body, "parameter \"max_tokens\"")) &&
+		(strings.Contains(body, "unsupported") || strings.Contains(body, "not supported") || strings.Contains(body, "not a valid"))
+}
+
+func isMaxTokensParameterName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "max_tokens" || value == "max_completion_tokens"
+}
+
+func explicitlyUnsupportedParameter(message, code string) bool {
+	value := strings.ToLower(message + " " + code)
+	return strings.Contains(value, "unsupported") || strings.Contains(value, "not supported") || strings.Contains(value, "not a valid") || strings.Contains(value, "unknown parameter")
 }
 
 // retryWithoutMaxCompletionTokens attempts the request again without max_completion_tokens.
@@ -830,8 +861,9 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 			return nil, diagnosticFailure(completionUpstreamError, failureUpstreamRead,
 				fmt.Errorf("failed to read error response: %w", readErr))
 		}
+		trace.capture(diagnostics.ContentBoundaryUpstreamResponse, attempt+1, respBody)
 		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamStatus,
-			fmt.Errorf("OpenAI API returned status %d: %s", resp.StatusCode, boundedUpstreamText(respBody)))
+			newUpstreamStatusError(resp.StatusCode, respBody))
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -885,6 +917,29 @@ func boundedUpstreamText(body []byte) string {
 func errorJSON(err error) string {
 	encoded, _ := json.Marshal(map[string]string{"error": err.Error()})
 	return string(encoded)
+}
+
+func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, err error) {
+	requestID, attempts, retries := "", 0, 0
+	if trace != nil {
+		trace.mu.Lock()
+		requestID = trace.event.RequestID
+		attempts = len(trace.metadata.Attempts)
+		for _, attempt := range trace.metadata.Attempts {
+			if attempt.Retry {
+				retries++
+			}
+		}
+		trace.mu.Unlock()
+	}
+	upstreamStatus := 0
+	var statusErr *upstreamStatusError
+	if errors.As(err, &statusErr) {
+		upstreamStatus = statusErr.StatusCode
+	}
+	completionState, failureKind := classifyFailure(err)
+	fmt.Printf("[ERROR] Upstream request failed request_id=%s provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s attempts=%d retries=%d\n",
+		requestID, cfg.DetectProvider(), model, streaming, fiber.StatusBadGateway, upstreamStatus, completionState, failureKind, attempts, retries)
 }
 
 func handleCountTokens(c *fiber.Ctx, cfg *config.Config) error {

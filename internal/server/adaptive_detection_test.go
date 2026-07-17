@@ -1,78 +1,39 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
+	"github.com/claude-code-proxy/proxy/pkg/models"
 )
 
-// TestMaxTokensParameterErrorDetection tests the error detection logic for parameter errors
-func TestMaxTokensParameterErrorDetection(t *testing.T) {
+func TestUnsupportedMaxTokensParameter(t *testing.T) {
+	req := &models.OpenAIRequest{MaxCompletionTokens: 1024}
 	tests := []struct {
-		name          string
-		errorMsg      string
-		shouldDetect  bool
-		description   string
+		name string
+		err  error
+		want bool
 	}{
-		{
-			name:         "max_completion_tokens unsupported",
-			errorMsg:     "Error: unsupported parameter 'max_completion_tokens'",
-			shouldDetect: true,
-			description:  "Should detect unsupported max_completion_tokens",
-		},
-		{
-			name:         "max_tokens invalid",
-			errorMsg:     "invalid parameter: max_tokens not supported for this model",
-			shouldDetect: true,
-			description:  "Should detect invalid max_tokens",
-		},
-		{
-			name:         "parameter error lowercase",
-			errorMsg:     "parameter 'max_completion_tokens' is not supported",
-			shouldDetect: true,
-			description:  "Should handle lowercase parameter errors",
-		},
-		{
-			name:         "OpenWebUI style error",
-			errorMsg:     "500: 'max_completion_tokens' is not a valid OpenAI parameter",
-			shouldDetect: true,
-			description:  "Should detect OpenWebUI style errors",
-		},
-		{
-			name:         "unrelated error",
-			errorMsg:     "Authentication failed",
-			shouldDetect: false,
-			description:  "Should not detect unrelated errors",
-		},
-		{
-			name:         "timeout error",
-			errorMsg:     "request timeout",
-			shouldDetect: false,
-			description:  "Should not detect timeout errors",
-		},
-		{
-			name:         "empty error message",
-			errorMsg:     "",
-			shouldDetect: false,
-			description:  "Should handle empty error messages",
-		},
-		{
-			name:         "wrong parameter name",
-			errorMsg:     "unsupported parameter 'max_input_tokens'",
-			shouldDetect: false,
-			description:  "Should not detect errors for wrong parameters",
-		},
+		{"structured parameter rejection", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 400, Body: []byte(`{"error":{"param":"max_completion_tokens","message":"unsupported parameter"}}`)}), true},
+		{"unprocessable parameter rejection", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 422, Body: []byte(`{"error":{"param":"max_tokens","message":"not supported"}}`)}), true},
+		{"structured context limit", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 400, Body: []byte(`{"error":{"param":"max_completion_tokens","message":"value exceeds context window"}}`)}), false},
+		{"context window 502", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 502, Body: []byte(`{"error":{"type":"invalid_request_error","message":"max_completion_tokens context window exceeded"}}`)}), false},
+		{"server parameter error", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 500, Body: []byte(`{"error":{"param":"max_completion_tokens"}}`)}), false},
+		{"unrelated validation error", diagnosticFailure(completionUpstreamError, failureUpstreamStatus, &upstreamStatusError{StatusCode: 400, Body: []byte(`{"error":{"param":"temperature"}}`)}), false},
+		{"transport error", fmt.Errorf("connection refused"), false},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isMaxTokensParameterError(tt.errorMsg)
-			if result != tt.shouldDetect {
-				t.Errorf("%s: got %v, want %v", tt.description, result, tt.shouldDetect)
+			if got := isUnsupportedMaxTokensParameter(tt.err, req); got != tt.want {
+				t.Fatalf("isUnsupportedMaxTokensParameter() = %t, want %t", got, tt.want)
 			}
 		})
+	}
+	if isUnsupportedMaxTokensParameter(tests[0].err, &models.OpenAIRequest{}) {
+		t.Fatal("requests without a token-limit field must not retry")
 	}
 }
 
@@ -291,47 +252,6 @@ func TestCacheTimestampTracking(t *testing.T) {
 	}
 }
 
-// TestErrorDetectionBroadMatching tests broad keyword matching for various error formats
-func TestErrorDetectionBroadMatching(t *testing.T) {
-	// These should ALL match: require both parameter indicator AND parameter name
-	shouldMatch := []string{
-		"parameter 'max_completion_tokens'",
-		"Parameter 'max_completion_tokens'",
-		"parameter max_tokens",
-		"invalid parameter max_completion_tokens",
-		"unsupported parameter max_tokens",
-		"Parameter 'MAX_COMPLETION_TOKENS' is invalid",
-		"UNSUPPORTED parameter max_tokens",
-		"OpenAI error: parameter max_completion_tokens unsupported",
-		"OpenWebUI: parameter 'max_completion_tokens' not supported",
-		"LiteLLM error: invalid parameter max_tokens",
-		"Invalid max_tokens parameter",
-		"Unsupported max_completion_tokens",
-	}
-
-	for _, pattern := range shouldMatch {
-		if !isMaxTokensParameterError(pattern) {
-			t.Errorf("Should detect parameter error: %s", pattern)
-		}
-	}
-
-	// These should NOT match: missing either indicator or parameter name
-	shouldNotMatch := []string{
-		"parameter 'max_input_tokens'",  // wrong parameter
-		"parameter mismatch",             // no token param
-		"max_tokens is great",            // no error indicator
-		"invalid request",                // no token param
-		"unsupported feature",            // no token param
-		"",                               // empty
-	}
-
-	for _, pattern := range shouldNotMatch {
-		if isMaxTokensParameterError(pattern) {
-			t.Errorf("Should NOT detect parameter error: %s", pattern)
-		}
-	}
-}
-
 // Helper types and functions for testing (would be in actual implementation)
 
 // CacheKey identifies a model capability cache entry
@@ -367,5 +287,4 @@ func (c *ModelCapabilityCache) Set(key CacheKey, caps *ModelCapabilities) {
 	c.data[key] = caps
 }
 
-// NOTE: isMaxTokensParameterError is already defined in handlers.go
-// These tests use that implementation
+// Retry classification is covered by TestUnsupportedMaxTokensParameter above.

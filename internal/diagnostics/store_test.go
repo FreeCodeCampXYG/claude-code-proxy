@@ -19,10 +19,14 @@ func TestStoreContentRetentionAndPartialSummary(t *testing.T) {
 	if err := store.Insert(t.Context(), Event{RequestID: "content-event", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"payload":"` + strings.Repeat("x", DefaultMaxContentBytes) + `"}`)
-	content, mode, err := RepresentJSONContent(body, ContentRepresentationOptions{MaxBytes: 128, PreviewBytes: 16})
+	body := []byte(`{"payload":"` + strings.Repeat("中", DefaultMaxContentBytes) + `","path":"C:\\private\\project\\file.go","api_key":"sk-secret"}`)
+	content, mode, err := RepresentJSONContent(body, ContentRepresentationOptions{MaxBytes: 128, PreviewBytes: 16, SourceBytes: len(body)})
 	if err != nil || mode != ContentCaptureSummary || !json.Valid(content) {
 		t.Fatalf("RepresentJSONContent() = %s, %q, %v", content, mode, err)
+	}
+	var summary PartialJSONSummary
+	if err := json.Unmarshal(content, &summary); err != nil || summary.OmittedChars <= 0 || summary.DisplayedChars <= 0 || summary.Reason != "content_limit" {
+		t.Fatalf("partial summary = %#v, %v", summary, err)
 	}
 	if err := store.InsertContent(t.Context(), ContentSnapshot{RequestID: "content-event", Boundary: ContentBoundaryClaudeRequest, Content: content, CaptureMode: mode}); err != nil {
 		t.Fatal(err)
@@ -39,12 +43,29 @@ func TestStoreContentRetentionAndPartialSummary(t *testing.T) {
 	}
 }
 
+func TestPrepareSnapshotsRedactsLargeContentAndPaths(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	body := []byte(`{"prompt":"` + strings.Repeat("x", 1400*1024) + `","workspace":"\\\\server\\share\\repo","arguments":"{\"api_key\":\"sk-secret\",\"file_path\":\"/private/source/main.go\"}"}`)
+	snapshots := store.prepareSnapshots([]ContentCapture{{RequestID: "large", Boundary: ContentBoundaryClaudeRequest, SourceBytes: len(body), Body: body}})
+	if len(snapshots) != 1 || snapshots[0].CaptureMode != ContentCaptureSummary {
+		t.Fatalf("snapshots = %#v", snapshots)
+	}
+	text := string(snapshots[0].Content)
+	if strings.Contains(text, "sk-secret") || strings.Contains(text, "server\\share") || strings.Contains(text, "/private/source") || strings.Contains(text, "sha256") {
+		t.Fatalf("unsafe partial snapshot: %s", text)
+	}
+	var summary PartialJSONSummary
+	if err := json.Unmarshal(snapshots[0].Content, &summary); err != nil || summary.OmittedChars == 0 || summary.SourceBytes != len(body) {
+		t.Fatalf("summary = %#v, %v", summary, err)
+	}
+}
+
 func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	store := openTestStore(t, StoreOptions{})
 	ctx := context.Background()
 	base := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
 	events := []Event{
-		{RequestID: "req-1", CreatedAt: base, Method: "POST", Path: "/v1/messages", Provider: "openrouter", Model: "gpt-5", StatusCode: 200, Duration: 1250 * time.Millisecond, Streaming: true, RequestBody: json.RawMessage(`{"model":"gpt-5"}`)},
+		{RequestID: "req-1", CreatedAt: base, Method: "POST", Path: "/v1/messages", Provider: "openrouter", Model: "gpt-5", APIKeyLabel: "key-1", StatusCode: 200, Duration: 1250 * time.Millisecond, Streaming: true, RequestBody: json.RawMessage(`{"model":"gpt-5"}`)},
 		{RequestID: "req-2", CreatedAt: base.Add(time.Minute), Method: "POST", Path: "/v1/messages", Provider: "openai", Model: "gpt-5-mini", StatusCode: 500, Error: "upstream failed", Metadata: json.RawMessage(`{"attempt":2}`)},
 	}
 	for _, event := range events {
@@ -57,7 +78,7 @@ func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].RequestID != "req-1" || summaries[0].Duration != 1250*time.Millisecond {
+	if len(summaries) != 1 || summaries[0].RequestID != "req-1" || summaries[0].Duration != 1250*time.Millisecond || summaries[0].APIKeyLabel != "key-1" {
 		t.Fatalf("unexpected summaries: %#v", summaries)
 	}
 
@@ -65,7 +86,7 @@ func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detail() error = %v", err)
 	}
-	if detail.Model != "gpt-5" || string(detail.RequestBody) != `{"model":"gpt-5"}` || !detail.Streaming {
+	if detail.Model != "gpt-5" || detail.APIKeyLabel != "key-1" || string(detail.RequestBody) != `{"model":"gpt-5"}` || !detail.Streaming {
 		t.Fatalf("unexpected detail: %#v", detail)
 	}
 
@@ -119,7 +140,7 @@ func TestStoreMigratesV1PreservingRows(t *testing.T) {
 		t.Fatalf("migrated event = %#v, %v", event, err)
 	}
 	var version int
-	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
 		t.Fatalf("schema version = %d, %v", version, err)
 	}
 }
@@ -128,7 +149,7 @@ func TestStoreRejectsNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "diagnostics.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil { t.Fatal(err) }
-	if _, err := db.Exec("PRAGMA user_version=4"); err != nil { t.Fatal(err) }
+	if _, err := db.Exec("PRAGMA user_version=5"); err != nil { t.Fatal(err) }
 	_ = db.Close()
 	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("Open() error = %v, want newer schema rejection", err)
@@ -139,9 +160,9 @@ func TestStoreAnalyticsAggregatesNormalizedFields(t *testing.T) {
 	store := openTestStore(t, StoreOptions{})
 	base := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
 	events := []Event{
-		{RequestID: "ok", CreatedAt: base, Provider: "newapi", Model: "gpt", StatusCode: 200, Duration: 100 * time.Millisecond, Streaming: true, AttemptCount: 2, RetryCount: 1, InputTokens: 10, OutputTokens: 20, CacheReadInputTokens: 3, CacheCreationInputTokens: 2, CompletionState: "completed", TaskHash: "task-a"},
-		{RequestID:"truncated",CreatedAt:base.Add(time.Hour),Provider:"newapi",Model:"gpt",StatusCode:502,Duration:300*time.Millisecond,Streaming:true,AttemptCount:1,InputTokens:4,OutputTokens:5,CompletionState:"truncated",FailureKind:"truncated",Truncated:true},
-		{RequestID:"canceled",CreatedAt:base.Add(time.Hour),Provider:"openai",Model:"mini",StatusCode:502,Duration:200*time.Millisecond,AttemptCount:1,CompletionState:"canceled",FailureKind:"canceled",Canceled:true},
+		{RequestID: "ok", CreatedAt: base, Provider: "newapi", Model: "gpt", APIKeyLabel: "key-1", StatusCode: 200, Duration: 100 * time.Millisecond, Streaming: true, AttemptCount: 2, RetryCount: 1, InputTokens: 10, OutputTokens: 20, CacheReadInputTokens: 3, CacheCreationInputTokens: 2, CompletionState: "completed", TaskHash: "task-a"},
+		{RequestID:"truncated",CreatedAt:base.Add(time.Hour),Provider:"newapi",Model:"gpt",APIKeyLabel:"key-2",StatusCode:502,Duration:300*time.Millisecond,Streaming:true,AttemptCount:1,InputTokens:4,OutputTokens:5,CompletionState:"truncated",FailureKind:"truncated",Truncated:true},
+		{RequestID:"canceled",CreatedAt:base.Add(time.Hour),Provider:"openai",Model:"mini",APIKeyLabel:"key-2",StatusCode:502,Duration:200*time.Millisecond,AttemptCount:1,CompletionState:"canceled",FailureKind:"canceled",Canceled:true},
 	}
 	for _, event := range events { if err := store.Insert(t.Context(), event); err != nil { t.Fatal(err) } }
 	a, err := store.Analytics(t.Context(), Query{Since:base, Until:base.Add(2*time.Hour)})
@@ -149,7 +170,7 @@ func TestStoreAnalyticsAggregatesNormalizedFields(t *testing.T) {
 	if a.Total != 3 || a.Success != 1 || a.Failure != 2 || a.Truncated != 1 || a.Canceled != 1 || a.Streaming != 2 || a.Retries != 1 || a.Attempts != 4 || a.AverageAttempts != 4.0/3.0 || a.InputTokens != 14 || a.OutputTokens != 25 || a.CacheReadInputTokens != 3 || a.CacheCreationInputTokens != 2 || a.AverageLatencyMS != 200 || a.P95LatencyMS != 300 || a.TaskGroupingUnavailable != 2 {
 		t.Fatalf("unexpected analytics: %#v", a)
 	}
-	if len(a.HourlyTimeline) != 2 || len(a.ByModel) != 2 || len(a.ByProvider) != 2 || len(a.ByCompletionState) != 3 || len(a.TaskGroups) != 1 {
+	if len(a.HourlyTimeline) != 2 || len(a.ByModel) != 2 || len(a.ByProvider) != 2 || len(a.ByAPIKey) != 2 || len(a.ByCompletionState) != 3 || len(a.TaskGroups) != 1 {
 		t.Fatalf("unexpected breakdowns: %#v", a)
 	}
 }

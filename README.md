@@ -266,7 +266,9 @@ make build-all
 ## Configuration Reference
 
 **Required:**
-- `OPENAI_API_KEY` - Your API key (not needed for Ollama/localhost)
+- `OPENAI_API_KEY` - One API key (legacy single-key mode; not needed for Ollama/localhost)
+- `OPENAI_API_KEYS` - Optional comma-separated API keys for manual selection; do not set it together with `OPENAI_API_KEY`
+- `OPENAI_API_KEY_INDEX` - 1-based selected entry from `OPENAI_API_KEYS` (default: `1`); change it and restart to switch accounts. Logs and diagnostics expose only anonymous `key-1` / `key-2` labels.
 
 **Optional - API Configuration:**
 - `OPENAI_BASE_URL` - API base URL (default: `https://api.openai.com/v1`)
@@ -303,9 +305,9 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 
 Diagnostics can also be enabled with `-d`/`--debug`. It takes effect only for a newly started proxy: if one is already running, run `claude-code-proxy stop` first, then restart it with `-d`. `-d` enables **redacted diagnostics only**; it never enables content capture. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). Check `/health` for `"diagnostics_enabled": true`; the diagnostics routes accept only loopback connections, and forwarded headers do not bypass this restriction.
 
-By default, captured request and response data is redacted before storage. Secrets and conversational content are replaced with type, length, and SHA-256 metadata; oversized or malformed bodies are stored only as bounded metadata, and successful streams store summaries rather than raw chunks. Operational fields such as model, provider, status, timing, token counts, roles, tool names, request structure, and redaction hashes remain visible.
+By default, diagnostics retain only redacted operational metadata. Secrets and conversational fields are replaced with type and length descriptors; no redaction hashes are exposed. Final upstream failures are logged with request correlation and status metadata only, never upstream bodies. Context-window and other 5xx failures are not adaptive-retried; the one capability fallback is reserved for explicit validation errors that reject `max_tokens` or `max_completion_tokens`.
 
-When `DIAGNOSTICS_CAPTURE_CONTENT=true` is explicitly set, the local viewer may retain bounded snapshots of the inbound Claude request, converted upstream request, upstream response, and returned Claude response. Oversized valid JSON is stored as a clearly labelled summary with size/hash and limited previews; malformed data and all request headers remain excluded. Streams are normalized into their semantic content and are never saved as original SSE frames. Content snapshots are short-lived, never included in NDJSON export, and available only through the protected local viewer. The SQLite database is not encrypted, so protect the database directory and any data copied from the viewer as sensitive diagnostic data.
+When `DIAGNOSTICS_CAPTURE_CONTENT=true` is explicitly set, the local viewer may retain bounded snapshots of the inbound Claude request, converted upstream request, upstream response, and returned Claude response. Bounded valid JSON remains fully viewable after secret removal and basename-only path normalization. Oversized valid JSON is stored as a clearly labelled first/last UTF-8-safe excerpt with an omitted-character count; malformed data and all request headers remain excluded. Streams are normalized into their semantic content and are never saved as original SSE frames. Content snapshots are short-lived, never included in NDJSON export, and available only through the protected local viewer. The SQLite database is not encrypted, so protect the database directory and any data copied from the viewer as sensitive diagnostic data.
 
 **Optional - Security:**
 - `ANTHROPIC_API_KEY` - Client API key validation (optional)

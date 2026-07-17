@@ -13,7 +13,7 @@ func TestDescribeMalformedBody(t *testing.T) {
 	if !metadata.Malformed || metadata.ContentType != "application/json" || metadata.Length != len(body) {
 		t.Fatalf("unexpected metadata: %#v", metadata)
 	}
-	if len(metadata.SHA256) != 64 || metadata.Error != "unexpected EOF" || metadata.Preview != "" {
+	if metadata.Error != "unexpected EOF" || metadata.Preview != "" {
 		t.Fatalf("malformed metadata missing safe details: %#v", metadata)
 	}
 	encoded := MalformedBodyJSON(body, "application/json", errors.New("unexpected EOF"))

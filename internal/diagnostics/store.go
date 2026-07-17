@@ -2,9 +2,7 @@ package diagnostics
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,8 +22,10 @@ import (
 const (
 	DefaultRetention             = 72 * time.Hour
 	DefaultContentRetention      = time.Hour
-	DefaultMaxContentBytes       = 64 * 1024
-	DefaultContentPreviewBytes   = 1024
+	DefaultMaxContentBytes     = 64 * 1024
+	DefaultContentPreviewBytes = 1024
+	DefaultCaptureBytes        = 2 * 1024 * 1024
+	DefaultCaptureInFlightBytes = 8 * 1024 * 1024
 )
 
 type StoreOptions struct {
@@ -46,6 +46,8 @@ type Store struct {
 	stop             chan struct{}
 	worker           sync.WaitGroup
 	dropped          atomic.Uint64
+	captureBytes     atomic.Int64
+	captureByteLimit int64
 }
 
 type persistJob struct {
@@ -63,6 +65,10 @@ type ContentCapture struct {
 	CreatedAt     time.Time
 	CaptureMode   ContentCaptureMode
 	Body          []byte
+	SourceBytes   int
+	SourceTruncated bool
+	Reason        string
+	ReservedBytes int64
 }
 
 type ContentBoundary string
@@ -98,16 +104,22 @@ type ContentQuery struct {
 }
 
 type ContentRepresentationOptions struct {
-	MaxBytes     int
-	PreviewBytes int
+	MaxBytes        int
+	PreviewBytes    int
+	SourceBytes     int
+	Reason          string
+	SourceTruncated bool
 }
 
 type PartialJSONSummary struct {
-	Partial bool   `json:"partial"`
-	Size    int    `json:"size"`
-	SHA256  string `json:"sha256"`
-	Head    string `json:"head"`
-	Tail    string `json:"tail"`
+	Partial          bool   `json:"partial"`
+	Reason           string `json:"reason"`
+	SourceBytes      int    `json:"source_bytes"`
+	SourceTruncated  bool   `json:"source_truncated,omitempty"`
+	DisplayedChars   int    `json:"displayed_characters"`
+	OmittedChars     int    `json:"omitted_characters"`
+	Head             string `json:"head"`
+	Tail             string `json:"tail"`
 }
 
 type Event struct {
@@ -137,6 +149,7 @@ type Event struct {
 	FailureKind     string          `json:"failure_kind,omitempty"`
 	Canceled        bool            `json:"canceled"`
 	Truncated       bool            `json:"truncated"`
+	APIKeyLabel    string          `json:"api_key_label,omitempty"`
 	TaskHash        string          `json:"task_hash,omitempty"`
 }
 
@@ -164,6 +177,7 @@ type EventSummary struct {
 	FailureKind     string        `json:"failure_kind,omitempty"`
 	Canceled        bool          `json:"canceled"`
 	Truncated       bool          `json:"truncated"`
+	APIKeyLabel    string        `json:"api_key_label,omitempty"`
 	TaskHash        string        `json:"task_hash,omitempty"`
 }
 
@@ -200,6 +214,7 @@ type Analytics struct {
 	P95LatencyMS            int64            `json:"p95_latency_ms"`
 	ByModel                 []AnalyticsCount `json:"by_model"`
 	ByProvider              []AnalyticsCount `json:"by_provider"`
+	ByAPIKey                []AnalyticsCount `json:"by_api_key"`
 	ByCompletionState       []AnalyticsCount `json:"by_completion_state"`
 	HourlyTimeline          []AnalyticsHour  `json:"hourly_timeline"`
 	TaskGroups              []TaskGroup      `json:"task_groups"`
@@ -255,6 +270,7 @@ func Open(path string, options StoreOptions) (*Store, error) {
 		contentRetention: options.ContentRetention,
 		captureContent:   options.CaptureContent,
 		now:              options.Now,
+		captureByteLimit: DefaultCaptureInFlightBytes,
 	}
 	if store.retention <= 0 {
 		store.retention = DefaultRetention
@@ -306,7 +322,7 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 	}
 	switch version {
 	case 0:
-		if _, err := store.db.ExecContext(ctx, createSchemaV3SQL); err != nil {
+		if _, err := store.db.ExecContext(ctx, createSchemaV4SQL); err != nil {
 			return fmt.Errorf("create diagnostics schema: %w", err)
 		}
 	case 1:
@@ -316,12 +332,22 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
+			return err
+		}
 	case 2:
 		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
+			return err
+		}
+	case 3:
+		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
+			return err
+		}
 	}
-	return store.validateAndRepairSchemaV3(ctx)
+	return store.validateAndRepairSchemaV4(ctx)
 }
 
 func (store *Store) migrate(ctx context.Context, statements []string, label string) error {
@@ -341,15 +367,15 @@ func (store *Store) migrate(ctx context.Context, statements []string, label stri
 	return nil
 }
 
-var requiredSchemaV3Columns = []string{
+var requiredSchemaV4Columns = []string{
 	"request_id", "created_at", "updated_at", "method", "path", "provider", "model",
 	"status_code", "duration_ms", "streaming", "error", "request_body", "response_body", "metadata",
 	"attempt_count", "retry_count", "input_tokens", "output_tokens", "cache_read_input_tokens",
 	"cache_creation_input_tokens", "chunk_count", "stop_reason", "completion_state", "failure_kind",
-	"canceled", "truncated", "task_hash",
+	"canceled", "truncated", "api_key_label", "task_hash",
 }
 
-var requiredSchemaV3Indexes = map[string]struct {
+var requiredSchemaV4Indexes = map[string]struct {
 	columns   []string
 	statement string
 }{
@@ -359,10 +385,10 @@ var requiredSchemaV3Indexes = map[string]struct {
 	"idx_diagnostics_content_created_at": {columns: []string{"created_at", "request_id", "attempt_number", "boundary"}, statement: `CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`},
 }
 
-func (store *Store) validateAndRepairSchemaV3(ctx context.Context) error {
+func (store *Store) validateAndRepairSchemaV4(ctx context.Context) error {
 	rows, err := store.db.QueryContext(ctx, "PRAGMA table_info(diagnostics_events)")
 	if err != nil {
-		return fmt.Errorf("inspect diagnostics schema v2 columns: %w", err)
+		return fmt.Errorf("inspect diagnostics schema v4 columns: %w", err)
 	}
 	columns := map[string]bool{}
 	for rows.Next() {
@@ -371,42 +397,42 @@ func (store *Store) validateAndRepairSchemaV3(ctx context.Context) error {
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan diagnostics schema v2 columns: %w", err)
+			return fmt.Errorf("scan diagnostics schema v4 columns: %w", err)
 		}
 		columns[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("iterate diagnostics schema v2 columns: %w", err)
+		return fmt.Errorf("iterate diagnostics schema v4 columns: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close diagnostics schema v2 column inspection: %w", err)
+		return fmt.Errorf("close diagnostics schema v4 column inspection: %w", err)
 	}
 	var missing []string
-	for _, name := range requiredSchemaV3Columns {
+	for _, name := range requiredSchemaV4Columns {
 		if !columns[name] {
 			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("diagnostics schema v2 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("diagnostics schema v4 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
 	}
 
-	for name, required := range requiredSchemaV3Indexes {
+	for name, required := range requiredSchemaV4Indexes {
 		var found string
 		err := store.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&found)
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, err := store.db.ExecContext(ctx, required.statement); err != nil {
-				return fmt.Errorf("repair diagnostics schema v2 index %s: %w", name, err)
+				return fmt.Errorf("repair diagnostics schema v4 index %s: %w", name, err)
 			}
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("inspect diagnostics schema v2 index %s: %w", name, err)
+			return fmt.Errorf("inspect diagnostics schema v4 index %s: %w", name, err)
 		}
 		indexRows, err := store.db.QueryContext(ctx, "PRAGMA index_info("+name+")")
 		if err != nil {
-			return fmt.Errorf("inspect diagnostics schema v2 index %s columns: %w", name, err)
+			return fmt.Errorf("inspect diagnostics schema v4 index %s columns: %w", name, err)
 		}
 		var actual []string
 		for indexRows.Next() {
@@ -414,19 +440,19 @@ func (store *Store) validateAndRepairSchemaV3(ctx context.Context) error {
 			var column string
 			if err := indexRows.Scan(&sequence, &cid, &column); err != nil {
 				_ = indexRows.Close()
-				return fmt.Errorf("scan diagnostics schema v2 index %s columns: %w", name, err)
+				return fmt.Errorf("scan diagnostics schema v4 index %s columns: %w", name, err)
 			}
 			actual = append(actual, column)
 		}
 		if err := indexRows.Err(); err != nil {
 			_ = indexRows.Close()
-			return fmt.Errorf("iterate diagnostics schema v2 index %s columns: %w", name, err)
+			return fmt.Errorf("iterate diagnostics schema v4 index %s columns: %w", name, err)
 		}
 		if err := indexRows.Close(); err != nil {
-			return fmt.Errorf("close diagnostics schema v2 index %s inspection: %w", name, err)
+			return fmt.Errorf("close diagnostics schema v4 index %s inspection: %w", name, err)
 		}
 		if !sameStrings(actual, required.columns) {
-			return fmt.Errorf("diagnostics schema v2 is incompatible: index %s has columns %v, want %v", name, actual, required.columns)
+			return fmt.Errorf("diagnostics schema v4 is incompatible: index %s has columns %v, want %v", name, actual, required.columns)
 		}
 	}
 	return nil
@@ -471,19 +497,30 @@ func (store *Store) startWriter() {
 				snapshots := store.prepareSnapshots(job.captures)
 				if err := store.insertBundle(ctx, job.event, snapshots); err != nil {
 					store.dropped.Add(1)
+					fmt.Printf("[WARN] Diagnostics persistence failed request_id=%s: %v\n", job.event.RequestID, err)
 				}
+				store.releaseCaptures(job.captures)
 				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
 					store.dropped.Add(1)
+					fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
 				}
 				cancel()
 			case <-cleanupTicker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
 					store.dropped.Add(1)
+					fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
 				}
 				cancel()
 			case <-store.stop:
-				return
+				for {
+					select {
+					case job := <-store.jobs:
+						store.releaseCaptures(job.captures)
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -492,7 +529,11 @@ func (store *Store) startWriter() {
 // Enqueue records a diagnostic bundle without waiting for SQLite. A full queue simply drops
 // the diagnostic record; callers must never let observability alter proxy behavior.
 func (store *Store) Enqueue(event Event, captures []ContentCapture) bool {
-	if store == nil || store.jobs == nil {
+	if store == nil {
+		return false
+	}
+	if store.jobs == nil {
+		store.releaseCaptures(captures)
 		return false
 	}
 	job := persistJob{event: event, captures: append([]ContentCapture(nil), captures...)}
@@ -500,8 +541,33 @@ func (store *Store) Enqueue(event Event, captures []ContentCapture) bool {
 	case store.jobs <- job:
 		return true
 	default:
+		store.releaseCaptures(captures)
 		store.dropped.Add(1)
 		return false
+	}
+}
+
+// ReserveCapture reserves deferred diagnostics memory without blocking proxy work.
+func (store *Store) ReserveCapture(size int) bool {
+	if store == nil || size <= 0 || int64(size) > DefaultCaptureBytes {
+		return false
+	}
+	for {
+		current := store.captureBytes.Load()
+		if current+int64(size) > store.captureByteLimit {
+			return false
+		}
+		if store.captureBytes.CompareAndSwap(current, current+int64(size)) {
+			return true
+		}
+	}
+}
+
+func (store *Store) releaseCaptures(captures []ContentCapture) {
+	for _, capture := range captures {
+		if capture.ReservedBytes > 0 {
+			store.captureBytes.Add(-capture.ReservedBytes)
+		}
 	}
 }
 
@@ -518,16 +584,25 @@ func (store *Store) prepareSnapshots(captures []ContentCapture) []ContentSnapsho
 	}
 	snapshots := make([]ContentSnapshot, 0, len(captures))
 	for _, capture := range captures {
-		if !validContentBoundary(capture.Boundary) || len(capture.Body) == 0 {
+		if !validContentBoundary(capture.Boundary) {
 			continue
 		}
-		safeBody, err := RedactSecretsJSON(capture.Body)
-		if err != nil {
-			continue
-		}
-		content, mode, err := RepresentJSONContent(safeBody, ContentRepresentationOptions{MaxBytes: DefaultMaxContentBytes})
-		if err != nil {
-			continue
+		content, mode := captureSummary(capture)
+		if len(capture.Body) > 0 {
+			safeBody, err := RedactSecretsJSON(capture.Body)
+			if err != nil {
+				capture.Reason = "malformed_json"
+				content, mode = captureSummary(capture)
+			} else {
+				content, mode, err = RepresentJSONContent(safeBody, ContentRepresentationOptions{
+					MaxBytes: DefaultMaxContentBytes, SourceBytes: capture.SourceBytes,
+					Reason: capture.Reason, SourceTruncated: capture.SourceTruncated,
+				})
+				if err != nil {
+					capture.Reason = "malformed_json"
+					content, mode = captureSummary(capture)
+				}
+			}
 		}
 		if capture.CaptureMode == ContentCaptureSummary {
 			mode = ContentCaptureSummary
@@ -561,15 +636,15 @@ func (store *Store) Insert(ctx context.Context, event Event) error {
 		status_code, duration_ms, streaming, error, request_body, response_body, metadata,
 		attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 		cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-		canceled, truncated, task_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		canceled, truncated, api_key_label, task_hash
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
 		nullableBytes(event.Metadata), event.AttemptCount, event.RetryCount, event.InputTokens,
 		event.OutputTokens, event.CacheReadInputTokens, event.CacheCreationInputTokens, event.ChunkCount,
 		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
-		boolInt(event.Truncated), event.TaskHash)
+		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash)
 	if err != nil {
 		return fmt.Errorf("insert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -694,13 +769,19 @@ func RepresentJSONContent(body []byte, options ContentRepresentationOptions) (js
 		previewBytes = DefaultContentPreviewBytes
 	}
 	previewBytes = minInt(previewBytes, len(body)/2)
-	sum := sha256.Sum256(body)
+	head, tail := utf8Head(body, previewBytes), utf8Tail(body, previewBytes)
+	totalChars := utf8.RuneCount(body)
+	displayedChars := utf8.RuneCountInString(head) + utf8.RuneCountInString(tail)
 	summary := PartialJSONSummary{
-		Partial: true,
-		Size:    len(body),
-		SHA256:  hex.EncodeToString(sum[:]),
-		Head:    utf8Head(body, previewBytes),
-		Tail:    utf8Tail(body, previewBytes),
+		Partial: true, Reason: options.Reason, SourceBytes: options.SourceBytes,
+		SourceTruncated: options.SourceTruncated, DisplayedChars: displayedChars,
+		OmittedChars: maxInt(0, totalChars-displayedChars), Head: head, Tail: tail,
+	}
+	if summary.Reason == "" {
+		summary.Reason = "content_limit"
+	}
+	if summary.SourceBytes == 0 {
+		summary.SourceBytes = len(body)
 	}
 	encoded, err := json.Marshal(summary)
 	if err != nil {
@@ -708,6 +789,17 @@ func RepresentJSONContent(body []byte, options ContentRepresentationOptions) (js
 	}
 	return encoded, ContentCaptureSummary, nil
 }
+
+func captureSummary(capture ContentCapture) (json.RawMessage, ContentCaptureMode) {
+	summary := PartialJSONSummary{Partial: true, Reason: capture.Reason, SourceBytes: capture.SourceBytes, SourceTruncated: capture.SourceTruncated}
+	if summary.Reason == "" {
+		summary.Reason = "capture_unavailable"
+	}
+	encoded, _ := json.Marshal(summary)
+	return encoded, ContentCaptureSummary
+}
+
+func maxInt(left, right int) int { if left > right { return left }; return right }
 
 func validContentBoundary(boundary ContentBoundary) bool {
 	switch boundary {
@@ -738,12 +830,12 @@ const eventColumns = `request_id, created_at, updated_at, method, path, provider
 	status_code, duration_ms, streaming, error, request_body, response_body, metadata,
 	attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 	cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-	canceled, truncated, task_hash`
+	canceled, truncated, api_key_label, task_hash`
 
 const summaryColumns = `request_id, created_at, updated_at, method, path, provider, model,
 	status_code, duration_ms, streaming, error, attempt_count, retry_count, input_tokens,
 	output_tokens, cache_read_input_tokens, cache_creation_input_tokens, chunk_count, stop_reason,
-	completion_state, failure_kind, canceled, truncated, task_hash`
+	completion_state, failure_kind, canceled, truncated, api_key_label, task_hash`
 
 func (store *Store) Detail(ctx context.Context, requestID string) (Event, error) {
 	return scanEvent(store.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM diagnostics_events WHERE request_id = ?", requestID))
@@ -828,11 +920,12 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		Until:             query.Until,
 		ByModel:           make([]AnalyticsCount, 0),
 		ByProvider:        make([]AnalyticsCount, 0),
+		ByAPIKey:          make([]AnalyticsCount, 0),
 		ByCompletionState: make([]AnalyticsCount, 0),
 		HourlyTimeline:    make([]AnalyticsHour, 0),
 		TaskGroups:        make([]TaskGroup, 0),
 	}
-	models, providers, states := map[string]int{}, map[string]int{}, map[string]int{}
+	models, providers, keys, states := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	hours, tasks := map[int64]*AnalyticsHour{}, map[string]int{}
 	latencies := make([]int64, 0, len(events))
 	var latencyTotal int64
@@ -858,6 +951,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		latencyTotal += latency
 		models[emptyLabel(event.Model)]++
 		providers[emptyLabel(event.Provider)]++
+		keys[emptyLabel(event.APIKeyLabel)]++
 		states[emptyLabel(event.CompletionState)]++
 		hour := event.CreatedAt.UTC().Truncate(time.Hour)
 		bucket := hours[hour.Unix()]
@@ -876,6 +970,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 	}
 	result.ByModel = sortedCounts(models)
 	result.ByProvider = sortedCounts(providers)
+	result.ByAPIKey = sortedCounts(keys)
 	result.ByCompletionState = sortedCounts(states)
 	for _, bucket := range hours { result.HourlyTimeline = append(result.HourlyTimeline, *bucket) }
 	sort.Slice(result.HourlyTimeline, func(i, j int) bool { return result.HourlyTimeline[i].Hour.Before(result.HourlyTimeline[j].Hour) })
@@ -952,7 +1047,7 @@ func scanEvent(source scanner) (Event, error) {
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &requestBody, &responseBody,
 		&metadata, &event.AttemptCount, &event.RetryCount, &event.InputTokens, &event.OutputTokens,
 		&event.CacheReadInputTokens, &event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason,
-		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.TaskHash)
+		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash)
 	if err != nil { return Event{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
@@ -969,7 +1064,7 @@ func scanSummary(source scanner) (EventSummary, error) {
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &event.AttemptCount,
 		&event.RetryCount, &event.InputTokens, &event.OutputTokens, &event.CacheReadInputTokens,
 		&event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason, &event.CompletionState,
-		&event.FailureKind, &canceled, &truncated, &event.TaskHash)
+		&event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash)
 	if err != nil { return EventSummary{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0

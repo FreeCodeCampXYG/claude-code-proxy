@@ -2,11 +2,10 @@ package diagnostics
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 )
 
@@ -24,7 +23,6 @@ type RedactedValue struct {
 	Redacted bool   `json:"redacted"`
 	Type     string `json:"type"`
 	Length   int    `json:"length"`
-	SHA256   string `json:"sha256"`
 }
 
 type RedactionLimit struct {
@@ -32,7 +30,6 @@ type RedactionLimit struct {
 	Reason   string `json:"reason"`
 	Type     string `json:"type"`
 	Length   int    `json:"length"`
-	SHA256   string `json:"sha256"`
 }
 
 var secretKeys = map[string]struct{}{
@@ -49,6 +46,11 @@ var conversationalKeys = map[string]struct{}{
 	"reasoning": {}, "reasoning_content": {}, "reasoning_details": {},
 	"signature": {}, "system": {}, "text": {}, "thinking": {},
 	"tool_calls": {}, "tool_result": {}, "tool_results": {}, "tools": {},
+}
+
+var pathKeys = map[string]struct{}{
+	"path": {}, "file": {}, "filename": {}, "file_path": {}, "cwd": {},
+	"directory": {}, "workdir": {}, "workspace": {},
 }
 
 func RedactJSON(body []byte, options RedactionOptions) ([]byte, error) {
@@ -104,6 +106,11 @@ func redactSecrets(value any) any {
 				continue
 			}
 			result[key] = redactSecrets(child)
+			if _, isPath := pathKeys[normalizeKey(key)]; isPath {
+				if value, ok := result[key].(string); ok {
+					result[key] = pathBaseName(value)
+				}
+			}
 		}
 		return result
 	case []any:
@@ -170,6 +177,11 @@ func (state *redactionState) walk(value any, key string, depth int, force bool) 
 		if force {
 			return describeRedacted(value)
 		}
+		if _, isPath := pathKeys[normalizeKey(key)]; isPath {
+			if value, ok := typed.(string); ok {
+				return pathBaseName(value)
+			}
+		}
 		return value
 	}
 }
@@ -199,24 +211,29 @@ func normalizeKey(key string) string {
 }
 
 func describeRedacted(value any) RedactedValue {
-	typeName, length, hash := describeValue(value)
-	return RedactedValue{Redacted: true, Type: typeName, Length: length, SHA256: hash}
+	typeName, length := describeValue(value)
+	return RedactedValue{Redacted: true, Type: typeName, Length: length}
 }
 
 func describeLimit(value any, reason string) RedactionLimit {
-	typeName, length, hash := describeValue(value)
-	return RedactionLimit{Redacted: true, Reason: reason, Type: typeName, Length: length, SHA256: hash}
+	typeName, length := describeValue(value)
+	return RedactionLimit{Redacted: true, Reason: reason, Type: typeName, Length: length}
 }
 
-func describeValue(value any) (string, int, string) {
-	typeName := jsonType(value)
-	length := valueLength(value)
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		encoded = []byte(fmt.Sprintf("%v", value))
+func describeValue(value any) (string, int) {
+	return jsonType(value), valueLength(value)
+}
+
+func pathBaseName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
 	}
-	sum := sha256.Sum256(encoded)
-	return typeName, length, hex.EncodeToString(sum[:])
+	value = strings.TrimRight(strings.ReplaceAll(value, "\\", "/"), "/")
+	if value == "" {
+		return ""
+	}
+	return path.Base(value)
 }
 
 func jsonType(value any) string {

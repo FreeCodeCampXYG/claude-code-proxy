@@ -128,7 +128,9 @@ Configuration:
     3. ~/.claude-code-proxy
 
   Required:
-    OPENAI_API_KEY         Your OpenAI API key
+    OPENAI_API_KEY         One upstream API key (legacy single-key mode)
+    OPENAI_API_KEYS        Comma-separated keys for manual selection
+    OPENAI_API_KEY_INDEX   1-based selected key index (default: 1)
 
   Optional:
     ANTHROPIC_DEFAULT_OPUS_MODEL    Override opus routing

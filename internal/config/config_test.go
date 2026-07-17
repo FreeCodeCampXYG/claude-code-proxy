@@ -231,6 +231,8 @@ func TestProviderSpecificParameters(t *testing.T) {
 
 // TestEnvironmentConfigLoading tests that .env files are loaded correctly
 func TestEnvironmentConfigLoading(t *testing.T) {
+	t.Setenv("OPENAI_API_KEYS", "")
+	t.Setenv("OPENAI_API_KEY_INDEX", "")
 	// Save current env vars
 	originalBaseURL := os.Getenv("OPENAI_BASE_URL")
 	originalAPIKey := os.Getenv("OPENAI_API_KEY")
@@ -269,6 +271,8 @@ func TestEnvironmentConfigLoading(t *testing.T) {
 
 // TestConfigDefaults tests default values
 func TestConfigDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEYS", "")
+	t.Setenv("OPENAI_API_KEY_INDEX", "")
 	// Clear relevant env vars for this test
 	originalBaseURL := os.Getenv("OPENAI_BASE_URL")
 	originalAPIKey := os.Getenv("OPENAI_API_KEY")
@@ -347,6 +351,8 @@ func TestProviderIsolation(t *testing.T) {
 
 // TestLoadWithDebug tests loading config with debug mode enabled
 func TestLoadWithDebug(t *testing.T) {
+	t.Setenv("OPENAI_API_KEYS", "")
+	t.Setenv("OPENAI_API_KEY_INDEX", "")
 	// Save original env
 	originalKey := os.Getenv("OPENAI_API_KEY")
 	originalBaseURL := os.Getenv("OPENAI_BASE_URL")

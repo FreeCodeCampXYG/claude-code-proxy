@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,7 +59,9 @@ var (
 // Config holds all proxy configuration
 type Config struct {
 	// Required
-	OpenAIAPIKey string
+	OpenAIAPIKey      string
+	OpenAIAPIKeyIndex int
+	OpenAIAPIKeyLabel string
 
 	// Optional
 	OpenAIBaseURL   string
@@ -119,8 +122,14 @@ func Load() (*Config, error) {
 	}
 
 	// Build config from environment
+	apiKey, apiKeyIndex, apiKeyLabel, err := selectedOpenAIAPIKey(os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_API_KEYS"), os.Getenv("OPENAI_API_KEY_INDEX"))
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
-		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
+		OpenAIAPIKey:      apiKey,
+		OpenAIAPIKeyIndex: apiKeyIndex,
+		OpenAIAPIKeyLabel: apiKeyLabel,
 		OpenAIBaseURL:   strings.TrimRight(getEnvOrDefault("OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
 		OpenAIProvider:  ProviderType(strings.ToLower(strings.TrimSpace(os.Getenv("OPENAI_PROVIDER")))),
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
@@ -190,12 +199,51 @@ func Load() (*Config, error) {
 		}
 		// Set dummy key for Ollama
 		cfg.OpenAIAPIKey = "ollama"
+		cfg.OpenAIAPIKeyIndex = 0
+		cfg.OpenAIAPIKeyLabel = "local"
 	}
 
 	return cfg, nil
 }
 
-// LoadWithDebug loads config and sets debug mode
+func selectedOpenAIAPIKey(singleKey, keysValue, indexValue string) (string, int, string, error) {
+	keysValue = strings.TrimSpace(keysValue)
+	if keysValue == "" {
+		if strings.TrimSpace(indexValue) != "" && strings.TrimSpace(indexValue) != "1" {
+			return "", 0, "", fmt.Errorf("OPENAI_API_KEY_INDEX requires OPENAI_API_KEYS")
+		}
+		if strings.TrimSpace(singleKey) == "" {
+			return "", 0, "", nil
+		}
+		return singleKey, 1, "key-1", nil
+	}
+	if strings.TrimSpace(singleKey) != "" {
+		return "", 0, "", fmt.Errorf("OPENAI_API_KEY and OPENAI_API_KEYS cannot both be set")
+	}
+	entries := strings.Split(keysValue, ",")
+	keys := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry)
+		if key == "" {
+			return "", 0, "", fmt.Errorf("OPENAI_API_KEYS must not contain empty entries")
+		}
+		keys = append(keys, key)
+	}
+	index := 1
+	if strings.TrimSpace(indexValue) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(indexValue))
+		if err != nil || parsed < 1 {
+			return "", 0, "", fmt.Errorf("OPENAI_API_KEY_INDEX must be a positive integer")
+		}
+		index = parsed
+	}
+	if index > len(keys) {
+		return "", 0, "", fmt.Errorf("OPENAI_API_KEY_INDEX must be between 1 and %d", len(keys))
+	}
+	return keys[index-1], index, fmt.Sprintf("key-%d", index), nil
+}
+
+
 func LoadWithDebug(debug bool) (*Config, error) {
 	cfg, err := Load()
 	if err != nil {
