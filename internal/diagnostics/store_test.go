@@ -60,6 +60,111 @@ func TestPrepareSnapshotsRedactsLargeContentAndPaths(t *testing.T) {
 	}
 }
 
+func TestStoreInsertBundleRollsBackEventWhenContentInsertFails(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_diagnostics_content
+		BEFORE INSERT ON diagnostics_content
+		BEGIN
+			SELECT RAISE(ABORT, 'reject content');
+		END;`); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.insertBundle(t.Context(), Event{RequestID: "atomic-bundle"}, []ContentSnapshot{{
+		RequestID: "atomic-bundle",
+		Boundary:  ContentBoundaryClaudeRequest,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "reject content") {
+		t.Fatalf("insertBundle() error = %v, want content insertion failure", err)
+	}
+	if _, err := store.Detail(t.Context(), "atomic-bundle"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Detail() error = %v, want sql.ErrNoRows after rollback", err)
+	}
+}
+
+func TestStoreInsertBundlePersistsEventAndSnapshots(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	snapshots := []ContentSnapshot{
+		{RequestID: "complete-bundle", Boundary: ContentBoundaryClaudeRequest, Content: json.RawMessage(`{"request":true}`)},
+		{RequestID: "complete-bundle", Boundary: ContentBoundaryUpstreamResponse, Content: json.RawMessage(`{"response":true}`)},
+	}
+	if err := store.insertBundle(t.Context(), Event{RequestID: "complete-bundle", Model: "gpt-5"}, snapshots); err != nil {
+		t.Fatalf("insertBundle() error = %v", err)
+	}
+	if event, err := store.Detail(t.Context(), "complete-bundle"); err != nil || event.Model != "gpt-5" {
+		t.Fatalf("Detail() = %#v, %v", event, err)
+	}
+	stored, err := store.Content(t.Context(), ContentQuery{RequestID: "complete-bundle"})
+	if err != nil || len(stored) != len(snapshots) {
+		t.Fatalf("Content() = %#v, %v", stored, err)
+	}
+}
+
+func TestStoreInsertBundleRejectsMismatchedSnapshotBeforeWritingEvent(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	err := store.insertBundle(t.Context(), Event{RequestID: "event-request"}, []ContentSnapshot{{
+		RequestID: "content-request",
+		Boundary:  ContentBoundaryClaudeRequest,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("insertBundle() error = %v, want request ID mismatch", err)
+	}
+	if _, err := store.Detail(t.Context(), "event-request"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Detail() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestStoreEnqueueAfterCloseReleasesCaptures(t *testing.T) {
+	store := openTestStore(t, StoreOptions{})
+	if !store.ReserveCapture(16) {
+		t.Fatal("ReserveCapture() = false")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	queued := store.Enqueue(Event{RequestID: "after-close"}, []ContentCapture{{ReservedBytes: 16}})
+	if queued {
+		t.Fatal("Enqueue() = true after Close()")
+	}
+	if bytes := store.captureBytes.Load(); bytes != 0 {
+		t.Fatalf("reserved capture bytes = %d, want 0", bytes)
+	}
+}
+
+func TestStoreClosePersistsAcceptedBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	store, err := Open(path, StoreOptions{CaptureContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.Enqueue(Event{RequestID: "before-close"}, []ContentCapture{{
+		RequestID: "before-close",
+		Boundary:  ContentBoundaryClaudeRequest,
+		Body:      []byte(`{"safe":true}`),
+		SourceBytes: len(`{"safe":true}`),
+	}) {
+		t.Fatal("Enqueue() = false")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path, StoreOptions{CaptureContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Detail(t.Context(), "before-close"); err != nil {
+		t.Fatalf("Detail() error = %v", err)
+	}
+	snapshots, err := store.Content(t.Context(), ContentQuery{RequestID: "before-close"})
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("Content() = %#v, %v", snapshots, err)
+	}
+}
+
 func TestStoreInsertQueryDetailDeleteClearAndExport(t *testing.T) {
 	store := openTestStore(t, StoreOptions{})
 	ctx := context.Background()

@@ -48,6 +48,8 @@ type Store struct {
 	dropped          atomic.Uint64
 	captureBytes     atomic.Int64
 	captureByteLimit int64
+	lifecycleMu      sync.Mutex
+	closing          bool
 }
 
 type persistJob struct {
@@ -474,11 +476,21 @@ func (store *Store) Close() error {
 	if store == nil || store.db == nil {
 		return nil
 	}
+	store.lifecycleMu.Lock()
+	if store.closing {
+		store.lifecycleMu.Unlock()
+		return nil
+	}
+	store.closing = true
 	if store.stop != nil {
 		close(store.stop)
-		store.worker.Wait()
-		store.stop = nil
 	}
+	store.lifecycleMu.Unlock()
+
+	store.worker.Wait()
+	store.lifecycleMu.Lock()
+	store.jobs, store.stop = nil, nil
+	store.lifecycleMu.Unlock()
 	return store.db.Close()
 }
 
@@ -493,30 +505,14 @@ func (store *Store) startWriter() {
 		for {
 			select {
 			case job := <-store.jobs:
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				snapshots := store.prepareSnapshots(job.captures)
-				if err := store.insertBundle(ctx, job.event, snapshots); err != nil {
-					store.dropped.Add(1)
-					fmt.Printf("[WARN] Diagnostics persistence failed request_id=%s: %v\n", job.event.RequestID, err)
-				}
-				store.releaseCaptures(job.captures)
-				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
-					store.dropped.Add(1)
-					fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
-				}
-				cancel()
+				store.persistJob(job)
 			case <-cleanupTicker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
-					store.dropped.Add(1)
-					fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
-				}
-				cancel()
+				store.cleanupExpiredContent()
 			case <-store.stop:
 				for {
 					select {
 					case job := <-store.jobs:
-						store.releaseCaptures(job.captures)
+						store.persistJob(job)
 					default:
 						return
 					}
@@ -526,13 +522,41 @@ func (store *Store) startWriter() {
 	}()
 }
 
+func (store *Store) persistJob(job persistJob) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	defer store.releaseCaptures(job.captures)
+
+	snapshots := store.prepareSnapshots(job.captures)
+	if err := store.insertBundle(ctx, job.event, snapshots); err != nil {
+		store.dropped.Add(1)
+		fmt.Printf("[WARN] Diagnostics bundle persistence failed; dropped request_id=%s: %v\n", job.event.RequestID, err)
+	}
+	store.cleanupExpiredContentContext(ctx)
+}
+
+func (store *Store) cleanupExpiredContent() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	store.cleanupExpiredContentContext(ctx)
+}
+
+func (store *Store) cleanupExpiredContentContext(ctx context.Context) {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
+		store.dropped.Add(1)
+		fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
+	}
+}
+
 // Enqueue records a diagnostic bundle without waiting for SQLite. A full queue simply drops
 // the diagnostic record; callers must never let observability alter proxy behavior.
 func (store *Store) Enqueue(event Event, captures []ContentCapture) bool {
 	if store == nil {
 		return false
 	}
-	if store.jobs == nil {
+	store.lifecycleMu.Lock()
+	defer store.lifecycleMu.Unlock()
+	if store.closing || store.jobs == nil {
 		store.releaseCaptures(captures)
 		return false
 	}
@@ -619,9 +643,13 @@ func (store *Store) prepareSnapshots(captures []ContentCapture) []ContentSnapsho
 	return snapshots
 }
 
-func (store *Store) Insert(ctx context.Context, event Event) error {
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (store *Store) normalizeEvent(event Event) (Event, error) {
 	if strings.TrimSpace(event.RequestID) == "" {
-		return errors.New("diagnostics request ID is required")
+		return Event{}, errors.New("diagnostics request ID is required")
 	}
 	now := store.now().UTC()
 	if event.CreatedAt.IsZero() {
@@ -630,14 +658,18 @@ func (store *Store) Insert(ctx context.Context, event Event) error {
 	if event.UpdatedAt.IsZero() {
 		event.UpdatedAt = event.CreatedAt
 	}
-	_, err := store.db.ExecContext(ctx, `
-	INSERT INTO diagnostics_events (
-		request_id, created_at, updated_at, method, path, provider, model,
-		status_code, duration_ms, streaming, error, request_body, response_body, metadata,
-		attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
-		cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
-		canceled, truncated, api_key_label, task_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	return event, nil
+}
+
+func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event Event) error {
+	_, err := executor.ExecContext(ctx, `
+		INSERT INTO diagnostics_events (
+			request_id, created_at, updated_at, method, path, provider, model,
+			status_code, duration_ms, streaming, error, request_body, response_body, metadata,
+			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
+			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
+			canceled, truncated, api_key_label, task_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
@@ -651,33 +683,18 @@ func (store *Store) Insert(ctx context.Context, event Event) error {
 	return nil
 }
 
-func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []ContentSnapshot) error {
-	if err := store.Insert(ctx, event); err != nil {
-		return err
-	}
-	for _, snapshot := range snapshots {
-		if err := store.InsertContent(ctx, snapshot); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot) error {
-	if !store.captureContent {
-		return nil
-	}
+func (store *Store) normalizeSnapshot(snapshot ContentSnapshot) (ContentSnapshot, error) {
 	if strings.TrimSpace(snapshot.RequestID) == "" {
-		return errors.New("diagnostics content request ID is required")
+		return ContentSnapshot{}, errors.New("diagnostics content request ID is required")
 	}
 	if snapshot.AttemptNumber < 0 {
-		return errors.New("diagnostics content attempt number must not be negative")
+		return ContentSnapshot{}, errors.New("diagnostics content attempt number must not be negative")
 	}
 	if !validContentBoundary(snapshot.Boundary) {
-		return fmt.Errorf("unsupported diagnostics content boundary %q", snapshot.Boundary)
+		return ContentSnapshot{}, fmt.Errorf("unsupported diagnostics content boundary %q", snapshot.Boundary)
 	}
 	if !json.Valid(snapshot.Content) {
-		return errors.New("diagnostics content must be valid JSON")
+		return ContentSnapshot{}, errors.New("diagnostics content must be valid JSON")
 	}
 	now := store.now().UTC()
 	if snapshot.CreatedAt.IsZero() {
@@ -693,9 +710,13 @@ func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot)
 		snapshot.CaptureMode = ContentCaptureFull
 	}
 	if snapshot.CaptureMode != ContentCaptureFull && snapshot.CaptureMode != ContentCaptureSummary {
-		return fmt.Errorf("unsupported diagnostics content capture mode %q", snapshot.CaptureMode)
+		return ContentSnapshot{}, fmt.Errorf("unsupported diagnostics content capture mode %q", snapshot.CaptureMode)
 	}
-	_, err := store.db.ExecContext(ctx, `
+	return snapshot, nil
+}
+
+func (store *Store) insertContent(ctx context.Context, executor sqlExecutor, snapshot ContentSnapshot) error {
+	_, err := executor.ExecContext(ctx, `
 		INSERT INTO diagnostics_content (request_id, attempt_number, boundary, created_at, expires_at, capture_mode, content)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id, attempt_number, boundary) DO UPDATE SET
@@ -706,6 +727,60 @@ func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot)
 		return fmt.Errorf("insert diagnostics content request %q attempt %d boundary %q: %w", snapshot.RequestID, snapshot.AttemptNumber, snapshot.Boundary, err)
 	}
 	return nil
+}
+
+func (store *Store) Insert(ctx context.Context, event Event) error {
+	event, err := store.normalizeEvent(event)
+	if err != nil {
+		return err
+	}
+	return store.insertEvent(ctx, store.db, event)
+}
+
+func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []ContentSnapshot) error {
+	event, err := store.normalizeEvent(event)
+	if err != nil {
+		return err
+	}
+	normalized := make([]ContentSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.RequestID != event.RequestID {
+			return fmt.Errorf("diagnostics content request ID %q does not match event request ID %q", snapshot.RequestID, event.RequestID)
+		}
+		snapshot, err = store.normalizeSnapshot(snapshot)
+		if err != nil {
+			return err
+		}
+		normalized = append(normalized, snapshot)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin diagnostics persistence transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := store.insertEvent(ctx, tx, event); err != nil {
+		return err
+	}
+	for _, snapshot := range normalized {
+		if err := store.insertContent(ctx, tx, snapshot); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit diagnostics persistence transaction: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot) error {
+	if !store.captureContent {
+		return nil
+	}
+	snapshot, err := store.normalizeSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+	return store.insertContent(ctx, store.db, snapshot)
 }
 
 func (store *Store) Content(ctx context.Context, query ContentQuery) ([]ContentSnapshot, error) {
