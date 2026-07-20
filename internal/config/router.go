@@ -46,11 +46,12 @@ var routerGroupNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
-		Enabled: false,
-		Simple: RouterRule{Enabled: true, MaxChars: 2000, Model: "gpt-5.6-luna", Effort: "light"},
-		ToolUse: RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "medium"},
-		ToolResult: RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "high"},
-		LongContext: RouterRule{Enabled: true, MinChars: 20000, Model: "gpt-5.6-sol", Effort: "xhigh"},
+		Enabled:       false,
+		Simple:        RouterRule{Enabled: true, MaxChars: 2000, Model: "gpt-5.6-luna", Effort: "low"},
+		ToolUse:       RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "medium"},
+		ToolResult:    RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "high"},
+		LongContext:   RouterRule{Enabled: true, MinChars: 20000, Model: "gpt-5.6-sol", Effort: "xhigh"},
+		KeywordGroups: []RouterKeywordGroup{},
 	}
 }
 
@@ -73,6 +74,7 @@ func NewRouterManager(path string) (*RouterManager, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read router config %s: %w", path, err)
 	}
+	cfg = NormalizeRouterConfig(cfg)
 	if err := ValidateRouterConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -99,6 +101,7 @@ func (m *RouterManager) Save(cfg RouterConfig) error {
 	if m == nil {
 		return fmt.Errorf("router manager is not initialized")
 	}
+	cfg = NormalizeRouterConfig(cfg)
 	if err := ValidateRouterConfig(cfg); err != nil {
 		return err
 	}
@@ -121,6 +124,35 @@ func (m *RouterManager) Save(cfg RouterConfig) error {
 	m.config = cloneRouterConfig(cfg)
 	m.mu.Unlock()
 	return nil
+}
+
+func NormalizeRouterConfig(cfg RouterConfig) RouterConfig {
+	cfg.Defaults = normalizeRouterRule(cfg.Defaults)
+	cfg.Simple = normalizeRouterRule(cfg.Simple)
+	cfg.ToolUse = normalizeRouterRule(cfg.ToolUse)
+	cfg.ToolResult = normalizeRouterRule(cfg.ToolResult)
+	cfg.LongContext = normalizeRouterRule(cfg.LongContext)
+	if cfg.KeywordGroups == nil {
+		cfg.KeywordGroups = []RouterKeywordGroup{}
+	}
+	for i := range cfg.KeywordGroups {
+		cfg.KeywordGroups[i].Name = strings.TrimSpace(cfg.KeywordGroups[i].Name)
+		cfg.KeywordGroups[i].Model = strings.TrimSpace(cfg.KeywordGroups[i].Model)
+		cfg.KeywordGroups[i].Effort = NormalizeRouterEffort(cfg.KeywordGroups[i].Effort)
+		if cfg.KeywordGroups[i].Keywords == nil {
+			cfg.KeywordGroups[i].Keywords = []string{}
+		}
+		for j := range cfg.KeywordGroups[i].Keywords {
+			cfg.KeywordGroups[i].Keywords[j] = strings.TrimSpace(cfg.KeywordGroups[i].Keywords[j])
+		}
+	}
+	return cfg
+}
+
+func normalizeRouterRule(rule RouterRule) RouterRule {
+	rule.Model = strings.TrimSpace(rule.Model)
+	rule.Effort = NormalizeRouterEffort(rule.Effort)
+	return rule
 }
 
 func ValidateRouterConfig(cfg RouterConfig) error {

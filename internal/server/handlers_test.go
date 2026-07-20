@@ -402,6 +402,25 @@ func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
 	}
 }
 
+func TestRouterConfigResponseReportsMissingAndExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.json")
+	manager, err := config.NewRouterManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := routerConfigResponse(manager)
+	if missing["exists"] != false || missing["status"] != "using_defaults_file_missing" || missing["path"] != path {
+		t.Fatalf("missing response = %#v", missing)
+	}
+	if err := manager.Save(config.DefaultRouterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	existing := routerConfigResponse(manager)
+	if existing["exists"] != true || existing["status"] != "loaded" {
+		t.Fatalf("existing response = %#v", existing)
+	}
+}
+
 func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	store := openDiagnosticsTestStore(t)
 	base := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)

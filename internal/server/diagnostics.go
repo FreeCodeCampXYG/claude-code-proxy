@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -648,7 +649,20 @@ func diagnosticsRouterConfig(c *fiber.Ctx, cfg *config.Config) error {
 	if cfg == nil || cfg.Router == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "router manager is not available"})
 	}
-	return c.JSON(fiber.Map{"path": cfg.Router.Path(), "config": cfg.Router.Snapshot()})
+	return c.JSON(routerConfigResponse(cfg.Router))
+}
+
+func routerConfigResponse(router *config.RouterManager) fiber.Map {
+	path := router.Path()
+	_, err := os.Stat(path)
+	exists := err == nil
+	status := "loaded"
+	if os.IsNotExist(err) {
+		status = "using_defaults_file_missing"
+	} else if err != nil {
+		status = "stat_error"
+	}
+	return fiber.Map{"path": path, "exists": exists, "status": status, "config": router.Snapshot()}
 }
 
 func diagnosticsSaveRouterConfig(c *fiber.Ctx, cfg *config.Config) error {
@@ -662,7 +676,7 @@ func diagnosticsSaveRouterConfig(c *fiber.Ctx, cfg *config.Config) error {
 	if err := cfg.Router.Save(routerConfig); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"path": cfg.Router.Path(), "config": cfg.Router.Snapshot()})
+	return c.JSON(routerConfigResponse(cfg.Router))
 }
 
 func diagnosticsDetail(c *fiber.Ctx, store *diagnostics.Store) error {
