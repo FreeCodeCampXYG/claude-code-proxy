@@ -1,6 +1,6 @@
 package diagnostics
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const createSchemaV5SQL = `
 CREATE TABLE diagnostics_events (
@@ -37,7 +37,12 @@ CREATE TABLE diagnostics_events (
 	upstream_response_bytes INTEGER NOT NULL DEFAULT 0,
 	claude_response_bytes INTEGER NOT NULL DEFAULT 0,
 	message_count INTEGER NOT NULL DEFAULT 0,
-	tool_count INTEGER NOT NULL DEFAULT 0
+	tool_count INTEGER NOT NULL DEFAULT 0,
+	incoming_effort TEXT NOT NULL DEFAULT '',
+	routed_effort TEXT NOT NULL DEFAULT '',
+	route_rule TEXT NOT NULL DEFAULT '',
+	route_model_overridden INTEGER NOT NULL DEFAULT 0,
+	route_effort_overridden INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE diagnostics_content (
 	request_id TEXT NOT NULL,
@@ -60,7 +65,7 @@ CREATE INDEX idx_diagnostics_content_created_at
 	ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary);
 CREATE INDEX idx_diagnostics_content_expires_at
 	ON diagnostics_content(expires_at, request_id);
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 `
 
 var migrateV1ToV2Statements = []string{
@@ -111,4 +116,13 @@ var migrateV4ToV5Statements = []string{
 	`ALTER TABLE diagnostics_events ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE diagnostics_events ADD COLUMN tool_count INTEGER NOT NULL DEFAULT 0`,
 	`PRAGMA user_version = 5`,
+}
+
+var migrateV5ToV6Statements = []string{
+	`ALTER TABLE diagnostics_events ADD COLUMN incoming_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE diagnostics_events ADD COLUMN routed_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE diagnostics_events ADD COLUMN route_rule TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE diagnostics_events ADD COLUMN route_model_overridden INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN route_effort_overridden INTEGER NOT NULL DEFAULT 0`,
+	`PRAGMA user_version = 6`,
 }

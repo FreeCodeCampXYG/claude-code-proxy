@@ -94,27 +94,27 @@ func TestMapModel(t *testing.T) {
 		{
 			name:        "haiku model",
 			claudeModel: "claude-haiku-3-5-20241022",
-			expected:    "gpt-5-mini",
+			expected:    "gpt-5.6-luna",
 		},
 		{
 			name:        "sonnet-4 model",
 			claudeModel: "claude-sonnet-4-20250514",
-			expected:    "gpt-5",
+			expected:    "gpt-5.6-terra",
 		},
 		{
 			name:        "sonnet-5 model",
 			claudeModel: "claude-sonnet-5-20250101",
-			expected:    "gpt-5",
+			expected:    "gpt-5.6-terra",
 		},
 		{
 			name:        "sonnet-3 model",
 			claudeModel: "claude-3-5-sonnet-20241022",
-			expected:    "gpt-5", // All sonnets now map to gpt-5
+			expected:    "gpt-5.6-terra", // All sonnets now map to gpt-5.6-terra
 		},
 		{
 			name:        "opus model",
 			claudeModel: "claude-opus-4-20250514",
-			expected:    "gpt-5",
+			expected:    "gpt-5.6-sol",
 		},
 		{
 			name:        "non-claude model (passthrough)",
@@ -203,8 +203,8 @@ func TestConvertRequest(t *testing.T) {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
 
-		if openaiReq.Model != "gpt-5" {
-			t.Errorf("Model = %q, want %q", openaiReq.Model, "gpt-5")
+		if openaiReq.Model != "gpt-5.6-terra" {
+			t.Errorf("Model = %q, want %q", openaiReq.Model, "gpt-5.6-terra")
 		}
 
 		if len(openaiReq.Messages) != 2 {
@@ -303,6 +303,25 @@ func TestConvertRequest(t *testing.T) {
 
 		if openaiReq.Tools[0].Function.Name != "get_weather" {
 			t.Errorf("Tool name = %q, want %q", openaiReq.Tools[0].Function.Name, "get_weather")
+		}
+	})
+
+	t.Run("request with GPT-compatible serial tools", func(t *testing.T) {
+		claudeReq := models.ClaudeRequest{
+			Model:     "claude-sonnet-4-20250514",
+			Messages: []models.ClaudeMessage{{Role: "user", Content: "Hello"}},
+			Tools: []models.Tool{{
+				Name:        "get_weather",
+				Description: "Get weather information",
+				InputSchema: map[string]interface{}{"type": "object"},
+			}},
+		}
+		openaiReq, err := ConvertRequest(claudeReq, &config.Config{DisableParallelToolCalls: true})
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		if openaiReq.ParallelToolCalls == nil || *openaiReq.ParallelToolCalls {
+			t.Fatalf("ParallelToolCalls = %#v, want false", openaiReq.ParallelToolCalls)
 		}
 	})
 }

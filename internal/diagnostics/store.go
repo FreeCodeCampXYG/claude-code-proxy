@@ -159,6 +159,11 @@ type Event struct {
 	ClaudeResponseBytes      int             `json:"claude_response_bytes"`
 	MessageCount             int             `json:"message_count"`
 	ToolCount                int             `json:"tool_count"`
+	IncomingEffort           string          `json:"incoming_effort,omitempty"`
+	RoutedEffort             string          `json:"routed_effort,omitempty"`
+	RouteRule                string          `json:"route_rule,omitempty"`
+	RouteModelOverridden     bool            `json:"route_model_overridden"`
+	RouteEffortOverridden    bool            `json:"route_effort_overridden"`
 }
 
 type EventSummary struct {
@@ -193,6 +198,11 @@ type EventSummary struct {
 	ClaudeResponseBytes      int           `json:"claude_response_bytes"`
 	MessageCount             int           `json:"message_count"`
 	ToolCount                int           `json:"tool_count"`
+	IncomingEffort           string        `json:"incoming_effort,omitempty"`
+	RoutedEffort             string        `json:"routed_effort,omitempty"`
+	RouteRule                string        `json:"route_rule,omitempty"`
+	RouteModelOverridden     bool          `json:"route_model_overridden"`
+	RouteEffortOverridden    bool          `json:"route_effort_overridden"`
 }
 
 type Query struct {
@@ -242,6 +252,9 @@ type Analytics struct {
 	ByProvider              []AnalyticsCount `json:"by_provider"`
 	ByAPIKey                []AnalyticsCount `json:"by_api_key"`
 	ByCompletionState       []AnalyticsCount `json:"by_completion_state"`
+	ByIncomingEffort        []AnalyticsCount `json:"by_incoming_effort"`
+	ByRoutedEffort          []AnalyticsCount `json:"by_routed_effort"`
+	ByRouteRule             []AnalyticsCount `json:"by_route_rule"`
 	HourlyTimeline          []AnalyticsHour  `json:"hourly_timeline"`
 	TaskGroups              []TaskGroup      `json:"task_groups"`
 	TaskGroupingUnavailable int              `json:"task_grouping_unavailable"`
@@ -391,6 +404,9 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV5ToV6Statements, "v5 to v6"); err != nil {
+			return err
+		}
 	case 2:
 		if err := store.migrate(ctx, migrateV2ToV3Statements, "v2 to v3"); err != nil {
 			return err
@@ -401,6 +417,9 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV5ToV6Statements, "v5 to v6"); err != nil {
+			return err
+		}
 	case 3:
 		if err := store.migrate(ctx, migrateV3ToV4Statements, "v3 to v4"); err != nil {
 			return err
@@ -408,8 +427,18 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
 			return err
 		}
+		if err := store.migrate(ctx, migrateV5ToV6Statements, "v5 to v6"); err != nil {
+			return err
+		}
 	case 4:
 		if err := store.migrate(ctx, migrateV4ToV5Statements, "v4 to v5"); err != nil {
+			return err
+		}
+		if err := store.migrate(ctx, migrateV5ToV6Statements, "v5 to v6"); err != nil {
+			return err
+		}
+	case 5:
+		if err := store.migrate(ctx, migrateV5ToV6Statements, "v5 to v6"); err != nil {
 			return err
 		}
 	}
@@ -440,6 +469,7 @@ var requiredSchemaV5Columns = []string{
 	"cache_creation_input_tokens", "chunk_count", "stop_reason", "completion_state", "failure_kind",
 	"canceled", "truncated", "api_key_label", "task_hash", "claude_request_bytes",
 	"upstream_request_bytes", "upstream_response_bytes", "claude_response_bytes", "message_count", "tool_count",
+	"incoming_effort", "routed_effort", "route_rule", "route_model_overridden", "route_effort_overridden",
 }
 
 var requiredSchemaV5Indexes = map[string]struct {
@@ -734,8 +764,9 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
-			upstream_response_bytes, claude_response_bytes, message_count, tool_count
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			upstream_response_bytes, claude_response_bytes, message_count, tool_count,
+			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
@@ -744,7 +775,8 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
 		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
 		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
-		event.MessageCount, event.ToolCount)
+		event.MessageCount, event.ToolCount, event.IncomingEffort, event.RoutedEffort, event.RouteRule,
+		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden))
 	if err != nil {
 		return fmt.Errorf("insert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -759,8 +791,9 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
-			upstream_response_bytes, claude_response_bytes, message_count, tool_count
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			upstream_response_bytes, claude_response_bytes, message_count, tool_count,
+			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			created_at=excluded.created_at, updated_at=excluded.updated_at, method=excluded.method,
 			path=excluded.path, provider=excluded.provider, model=excluded.model,
@@ -777,7 +810,10 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			upstream_request_bytes=excluded.upstream_request_bytes,
 			upstream_response_bytes=excluded.upstream_response_bytes,
 			claude_response_bytes=excluded.claude_response_bytes,
-			message_count=excluded.message_count, tool_count=excluded.tool_count`,
+			message_count=excluded.message_count, tool_count=excluded.tool_count,
+			incoming_effort=excluded.incoming_effort, routed_effort=excluded.routed_effort,
+			route_rule=excluded.route_rule, route_model_overridden=excluded.route_model_overridden,
+			route_effort_overridden=excluded.route_effort_overridden`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
@@ -786,7 +822,8 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 		event.StopReason, event.CompletionState, event.FailureKind, boolInt(event.Canceled),
 		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
 		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
-		event.MessageCount, event.ToolCount)
+		event.MessageCount, event.ToolCount, event.IncomingEffort, event.RoutedEffort, event.RouteRule,
+		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden))
 	if err != nil {
 		return fmt.Errorf("upsert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -1028,13 +1065,15 @@ const eventColumns = `request_id, created_at, updated_at, method, path, provider
 	attempt_count, retry_count, input_tokens, output_tokens, cache_read_input_tokens,
 	cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 	canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
-	upstream_response_bytes, claude_response_bytes, message_count, tool_count`
+	upstream_response_bytes, claude_response_bytes, message_count, tool_count,
+		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden`
 
 const summaryColumns = `request_id, created_at, updated_at, method, path, provider, model,
 	status_code, duration_ms, streaming, error, attempt_count, retry_count, input_tokens,
 	output_tokens, cache_read_input_tokens, cache_creation_input_tokens, chunk_count, stop_reason,
 	completion_state, failure_kind, canceled, truncated, api_key_label, task_hash, claude_request_bytes,
-	upstream_request_bytes, upstream_response_bytes, claude_response_bytes, message_count, tool_count`
+	upstream_request_bytes, upstream_response_bytes, claude_response_bytes, message_count, tool_count,
+		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden`
 
 func (store *Store) Detail(ctx context.Context, requestID string) (Event, error) {
 	return scanEvent(store.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM diagnostics_events WHERE request_id = ?", requestID))
@@ -1121,12 +1160,16 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		ByProvider:           make([]AnalyticsCount, 0),
 		ByAPIKey:             make([]AnalyticsCount, 0),
 		ByCompletionState:    make([]AnalyticsCount, 0),
+		ByIncomingEffort:     make([]AnalyticsCount, 0),
+		ByRoutedEffort:       make([]AnalyticsCount, 0),
+		ByRouteRule:          make([]AnalyticsCount, 0),
 		HourlyTimeline:       make([]AnalyticsHour, 0),
 		ModelConsumption:     make([]ModelConsumption, 0),
 		TaskGroups:           make([]TaskGroup, 0),
 		TokenByteCorrelation: TokenByteCorrelation{Status: "insufficient_samples"},
 	}
 	models, providers, keys, states := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
+	incomingEfforts, routedEfforts, routeRules := map[string]int{}, map[string]int{}, map[string]int{}
 	hours, tasks := map[int64]*AnalyticsHour{}, map[string]int{}
 	modelConsumption := map[string]*ModelConsumption{}
 	modelLatencies := map[string]int64{}
@@ -1164,6 +1207,9 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		providers[emptyLabel(event.Provider)]++
 		keys[emptyLabel(event.APIKeyLabel)]++
 		states[emptyLabel(event.CompletionState)]++
+		incomingEfforts[emptyLabel(event.IncomingEffort)]++
+		routedEfforts[emptyLabel(event.RoutedEffort)]++
+		routeRules[emptyLabel(event.RouteRule)]++
 		hour := event.CreatedAt.UTC().Truncate(time.Hour)
 		bucket := hours[hour.Unix()]
 		if bucket == nil { bucket = &AnalyticsHour{Hour: hour}; hours[hour.Unix()] = bucket }
@@ -1209,6 +1255,9 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 	result.ByProvider = sortedCounts(providers)
 	result.ByAPIKey = sortedCounts(keys)
 	result.ByCompletionState = sortedCounts(states)
+	result.ByIncomingEffort = sortedCounts(incomingEfforts)
+	result.ByRoutedEffort = sortedCounts(routedEfforts)
+	result.ByRouteRule = sortedCounts(routeRules)
 	for _, bucket := range hours { result.HourlyTimeline = append(result.HourlyTimeline, *bucket) }
 	sort.Slice(result.HourlyTimeline, func(i, j int) bool { return result.HourlyTimeline[i].Hour.Before(result.HourlyTimeline[j].Hour) })
 	for _, consumption := range modelConsumption {
@@ -1343,7 +1392,7 @@ type scanner interface { Scan(dest ...any) error }
 func scanEvent(source scanner) (Event, error) {
 	var event Event
 	var createdAt, updatedAt, durationMS int64
-	var streaming, canceled, truncated int
+	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden int
 	var requestBody, responseBody, metadata []byte
 	err := source.Scan(&event.RequestID, &createdAt, &updatedAt, &event.Method, &event.Path, &event.Provider,
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &requestBody, &responseBody,
@@ -1351,11 +1400,13 @@ func scanEvent(source scanner) (Event, error) {
 		&event.CacheReadInputTokens, &event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason,
 		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
 		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
-		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount)
+		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount, &event.IncomingEffort, &event.RoutedEffort,
+		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden)
 	if err != nil { return Event{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
 	event.Canceled, event.Truncated = canceled != 0, truncated != 0
+	event.RouteModelOverridden, event.RouteEffortOverridden = routeModelOverridden != 0, routeEffortOverridden != 0
 	event.RequestBody, event.ResponseBody, event.Metadata = cloneRaw(requestBody), cloneRaw(responseBody), cloneRaw(metadata)
 	return event, nil
 }
@@ -1363,18 +1414,20 @@ func scanEvent(source scanner) (Event, error) {
 func scanSummary(source scanner) (EventSummary, error) {
 	var event EventSummary
 	var createdAt, updatedAt, durationMS int64
-	var streaming, canceled, truncated int
+	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden int
 	err := source.Scan(&event.RequestID, &createdAt, &updatedAt, &event.Method, &event.Path, &event.Provider,
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &event.AttemptCount,
 		&event.RetryCount, &event.InputTokens, &event.OutputTokens, &event.CacheReadInputTokens,
 		&event.CacheCreationInputTokens, &event.ChunkCount, &event.StopReason, &event.CompletionState,
 		&event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
 		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
-		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount)
+		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount, &event.IncomingEffort, &event.RoutedEffort,
+		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden)
 	if err != nil { return EventSummary{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
 	event.Canceled, event.Truncated = canceled != 0, truncated != 0
+	event.RouteModelOverridden, event.RouteEffortOverridden = routeModelOverridden != 0, routeEffortOverridden != 0
 	return event, nil
 }
 

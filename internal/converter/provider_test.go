@@ -225,6 +225,20 @@ func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestEffortModelRouting(t *testing.T) {
+	req, err := ConvertRequest(models.ClaudeRequest{
+		Model:        "claude-sonnet-4",
+		Messages:     []models.ClaudeMessage{{Role: "user", Content: "test"}},
+		OutputConfig: &models.ClaudeOutputConfig{Effort: "xhigh"},
+	}, &config.Config{EffortModels: map[string]string{"xhigh": "gpt-5.6-terra-xhigh"}})
+	if err != nil {
+		t.Fatalf("ConvertRequest() error = %v", err)
+	}
+	if req.Model != "gpt-5.6-terra-xhigh" {
+		t.Fatalf("Model = %q, want effort-routed model", req.Model)
+	}
+}
+
 // TestModelMappingVerification tests that we're using the correct model for each provider
 func TestModelMappingVerification(t *testing.T) {
 	tests := []struct {

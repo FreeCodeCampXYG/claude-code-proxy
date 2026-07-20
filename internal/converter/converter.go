@@ -20,9 +20,9 @@ import (
 //   - ANTHROPIC_DEFAULT_SONNET_MODEL
 //   - ANTHROPIC_DEFAULT_HAIKU_MODEL
 const (
-	DefaultOpusModel   = "gpt-5"
-	DefaultSonnetModel = "gpt-5"
-	DefaultHaikuModel  = "gpt-5-mini"
+	DefaultOpusModel   = "gpt-5.6-sol"
+	DefaultSonnetModel = "gpt-5.6-terra"
+	DefaultHaikuModel  = "gpt-5.6-luna"
 )
 
 // extractSystemText extracts system text from Claude's flexible system parameter.
@@ -133,10 +133,28 @@ func normalizeReasoningObject(value map[string]interface{}, source string) []Rea
 	return nil
 }
 
+// RouteDecision describes the safe routing decision derived from proxy config.
+type RouteDecision struct {
+	Matched          bool
+	Rule             string
+	Model            string
+	Effort           string
+	ModelOverridden  bool
+	EffortOverridden bool
+}
+
+type routeFeatures struct {
+	TextLength    int
+	MessageCount  int
+	HasTools      bool
+	HasToolResult bool
+}
+
 // ConvertRequest converts a Claude API request to OpenAI format
 func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models.OpenAIRequest, error) {
-	// Map model using pattern-based routing
-	openaiModel := mapModel(claudeReq.Model, cfg)
+	decision := routeRequest(claudeReq, cfg)
+	// Map model using router decision, pattern-based routing, and optional overrides.
+	openaiModel := mapModelForRequest(claudeReq, cfg, decision)
 
 	// Extract system message (can be string or array of content blocks)
 	systemText := extractSystemText(claudeReq.System)
@@ -194,7 +212,11 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	if provider == config.ProviderNewAPI {
-		openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
+		if decision.EffortOverridden {
+			openaiReq.ReasoningEffort = decision.Effort
+		} else {
+			openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
+		}
 	}
 
 	// Set token limit using adaptive per-model detection
@@ -219,7 +241,20 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	// Convert tools (if present)
 	if len(claudeReq.Tools) > 0 {
 		openaiReq.Tools = convertTools(claudeReq.Tools)
+		if cfg.DisableParallelToolCalls {
+			parallel := false
+			openaiReq.ParallelToolCalls = &parallel
+		}
 	}
+
+	openaiReq.IncomingEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
+	openaiReq.RoutedEffort = openaiReq.IncomingEffort
+	if decision.EffortOverridden {
+		openaiReq.RoutedEffort = decision.Effort
+	}
+	openaiReq.RouteRule = decision.Rule
+	openaiReq.RouteModelOverridden = decision.ModelOverridden
+	openaiReq.RouteEffortOverridden = decision.EffortOverridden
 
 	return openaiReq, nil
 }
@@ -230,6 +265,113 @@ func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
 	}
 
 	return strings.ToLower(strings.TrimSpace(claudeReq.OutputConfig.Effort))
+}
+
+func mapModelForRequest(claudeReq models.ClaudeRequest, cfg *config.Config, decision RouteDecision) string {
+	if decision.ModelOverridden {
+		return decision.Model
+	}
+	return mapModel(claudeReq.Model, cfg)
+}
+
+func routeRequest(claudeReq models.ClaudeRequest, cfg *config.Config) RouteDecision {
+	if cfg == nil || cfg.Router == nil {
+		return RouteDecision{}
+	}
+	routerCfg := cfg.Router.Snapshot()
+	if !routerCfg.Enabled {
+		return RouteDecision{}
+	}
+	features := extractRouteFeatures(claudeReq)
+	for _, candidate := range []struct {
+		name string
+		rule config.RouterRule
+		ok   bool
+	}{
+		{name: "tool_result", rule: routerCfg.ToolResult, ok: features.HasToolResult},
+		{name: "long_context", rule: routerCfg.LongContext, ok: routerCfg.LongContext.MinChars > 0 && features.TextLength >= routerCfg.LongContext.MinChars},
+		{name: "tool_use", rule: routerCfg.ToolUse, ok: features.HasTools},
+		{name: "simple", rule: routerCfg.Simple, ok: !features.HasTools && !features.HasToolResult && routerCfg.Simple.MaxChars > 0 && features.TextLength <= routerCfg.Simple.MaxChars},
+	} {
+		if decision := decisionFromRule(candidate.name, candidate.rule, candidate.ok); decision.Matched {
+			return decision
+		}
+	}
+	text := strings.ToLower(routeText(claudeReq))
+	for _, group := range routerCfg.KeywordGroups {
+		if !group.Enabled {
+			continue
+		}
+		for _, keyword := range group.Keywords {
+			if strings.TrimSpace(keyword) != "" && strings.Contains(text, strings.ToLower(strings.TrimSpace(keyword))) {
+				return RouteDecision{Matched: true, Rule: "keyword:" + group.Name, Model: strings.TrimSpace(group.Model), Effort: config.NormalizeRouterEffort(group.Effort), ModelOverridden: strings.TrimSpace(group.Model) != "", EffortOverridden: config.NormalizeRouterEffort(group.Effort) != ""}
+			}
+		}
+	}
+	return decisionFromRule("default", routerCfg.Defaults, routerCfg.Defaults.Enabled)
+}
+
+func decisionFromRule(name string, rule config.RouterRule, condition bool) RouteDecision {
+	if !condition || !rule.Enabled {
+		return RouteDecision{}
+	}
+	model := strings.TrimSpace(rule.Model)
+	effort := config.NormalizeRouterEffort(rule.Effort)
+	if model == "" && effort == "" {
+		return RouteDecision{}
+	}
+	return RouteDecision{Matched: true, Rule: name, Model: model, Effort: effort, ModelOverridden: model != "", EffortOverridden: effort != ""}
+}
+
+func extractRouteFeatures(claudeReq models.ClaudeRequest) routeFeatures {
+	return routeFeatures{TextLength: len(routeText(claudeReq)), MessageCount: len(claudeReq.Messages), HasTools: len(claudeReq.Tools) > 0, HasToolResult: hasToolResult(claudeReq.Messages)}
+}
+
+func routeText(claudeReq models.ClaudeRequest) string {
+	var parts []string
+	if system := extractSystemText(claudeReq.System); system != "" {
+		parts = append(parts, system)
+	}
+	for _, message := range claudeReq.Messages {
+		parts = append(parts, messageText(message.Content))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func messageText(content interface{}) string {
+	switch content := content.(type) {
+	case string:
+		return content
+	case []interface{}:
+		var parts []string
+		for _, block := range content {
+			if blockMap, ok := block.(map[string]interface{}); ok {
+				if blockMap["type"] == "text" {
+					if text, ok := blockMap["text"].(string); ok {
+						parts = append(parts, text)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func hasToolResult(messages []models.ClaudeMessage) bool {
+	for _, message := range messages {
+		blocks, ok := message.Content.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, block := range blocks {
+			if blockMap, ok := block.(map[string]interface{}); ok && blockMap["type"] == "tool_result" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mapModel maps Claude model names to provider-specific models using pattern matching.

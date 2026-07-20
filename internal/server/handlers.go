@@ -81,6 +81,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 
 	streaming := openaiReq.Stream != nil && *openaiReq.Stream
 	trace.setModel(openaiReq.Model, streaming)
+	trace.setRouting(openaiReq)
 	if cfg.Debug {
 		fmt.Printf("[DEBUG] request_id=%s provider=%s model=%s key_label=%s streaming=%t tools=%d\n",
 			c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, cfg.OpenAIAPIKeyLabel, streaming, len(openaiReq.Tools))
@@ -93,16 +94,11 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	startTime := time.Now()
 	openaiResp, err := callOpenAI(c.UserContext(), openaiReq, cfg, trace)
 	if err != nil {
+		mapped := mapUpstreamErrorForDownstream(err, cfg)
 		trace.setResponseBody([]byte(errorJSON(err)))
-		trace.finish(fiber.StatusBadGateway, err)
-		logUpstreamFailure(trace, cfg, openaiReq.Model, false, err)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"type": "error",
-			"error": fiber.Map{
-				"type":    "api_error",
-				"message": fmt.Sprintf("OpenAI API error: %v", err),
-			},
-		})
+		trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
+		logUpstreamFailure(trace, cfg, openaiReq.Model, false, mapped.StatusCode, mapped.ContextWindowExceeded, err)
+		return c.Status(mapped.StatusCode).JSON(mapped.Body)
 	}
 
 	claudeResp, err := converter.ConvertResponse(openaiResp, claudeReq.Model)
@@ -174,10 +170,11 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 		trace.stage("stream_started", "")
 		resp, err := callOpenAIStream(streamContext, openaiReq, cfg, trace)
 		if err != nil {
-			_ = writeSSEError(w, fmt.Sprintf("streaming request failed: %v", err))
+			mapped := mapUpstreamErrorForDownstream(err, cfg)
+			_ = writeSSEError(w, mapped.StreamMessage, mapped.ErrorType)
 			trace.setResponseBody([]byte(errorJSON(err)))
-			trace.finish(fiber.StatusBadGateway, err)
-			logUpstreamFailure(trace, cfg, openaiReq.Model, true, err)
+			trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
+			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, err)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -570,9 +567,13 @@ func writeSSEEvent(w *bufio.Writer, event string, data interface{}) error {
 }
 
 // writeSSEError writes an error event.
-func writeSSEError(w *bufio.Writer, message string) error {
+func writeSSEError(w *bufio.Writer, message string, errorType ...string) error {
+	kind := "api_error"
+	if len(errorType) > 0 && strings.TrimSpace(errorType[0]) != "" {
+		kind = errorType[0]
+	}
 	return writeSSEEvent(w, "error", map[string]interface{}{
-		"type": "error", "error": map[string]interface{}{"type": "api_error", "message": message},
+		"type": "error", "error": map[string]interface{}{"type": kind, "message": message},
 	})
 }
 
@@ -727,6 +728,97 @@ func newUpstreamStatusError(statusCode int, body []byte) *upstreamStatusError {
 		StatusCode: statusCode,
 		Body:       append([]byte(nil), body...),
 		Message:    boundedUpstreamText(body),
+	}
+}
+
+type downstreamErrorMapping struct {
+	StatusCode            int
+	Body                  fiber.Map
+	ErrorType             string
+	StreamMessage         string
+	DiagnosticsError      error
+	ContextWindowExceeded bool
+}
+
+func mapUpstreamErrorForDownstream(err error, cfg *config.Config) downstreamErrorMapping {
+	if isContextWindowExceededError(err, cfg) {
+		message := fmt.Sprintf("context_window_exceeded: upstream rejected the request because it exceeds the target model context window. Original upstream error: %v", err)
+		return downstreamErrorMapping{
+			StatusCode: cfg.ContextWindowRewriteStatus,
+			ErrorType:  "invalid_request_error",
+			Body: fiber.Map{
+				"type": "error",
+				"error": fiber.Map{
+					"type":      "invalid_request_error",
+					"message":   message,
+					"retryable": false,
+				},
+			},
+			StreamMessage:         message,
+			DiagnosticsError:      diagnosticFailure(completionUpstreamError, failureContextWindowExceeded, err),
+			ContextWindowExceeded: true,
+		}
+	}
+	return downstreamErrorMapping{
+		StatusCode: fiber.StatusBadGateway,
+		ErrorType:  "api_error",
+		Body: fiber.Map{
+			"type": "error",
+			"error": fiber.Map{
+				"type":    "api_error",
+				"message": fmt.Sprintf("OpenAI API error: %v", err),
+			},
+		},
+		StreamMessage:    fmt.Sprintf("streaming request failed: %v", err),
+		DiagnosticsError: err,
+	}
+}
+
+func isContextWindowExceededError(err error, cfg *config.Config) bool {
+	if cfg == nil || !cfg.ContextWindowRewriteEnabled {
+		return false
+	}
+	var statusErr *upstreamStatusError
+	if !errors.As(err, &statusErr) || len(statusErr.Body) == 0 {
+		return false
+	}
+	body := strings.ToLower(contextWindowMatchText(statusErr.Body))
+	for _, pattern := range cfg.EffectiveContextWindowErrorPatterns() {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if pattern != "" && strings.Contains(body, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func contextWindowMatchText(body []byte) string {
+	var fields []string
+	var payload map[string]interface{}
+	if json.Unmarshal(body, &payload) == nil {
+		collectJSONStrings(payload, &fields)
+	}
+	if len(fields) > 0 {
+		fields = append(fields, string(body))
+		return strings.Join(fields, " ")
+	}
+	return string(body)
+}
+
+func collectJSONStrings(value interface{}, fields *[]string) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, child := range typed {
+			if key == "message" || key == "code" || key == "type" || key == "param" || key == "error" {
+				collectJSONStrings(child, fields)
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			collectJSONStrings(child, fields)
+		}
+	case string:
+		*fields = append(*fields, typed)
 	}
 }
 
@@ -929,18 +1021,9 @@ func errorJSON(err error) string {
 	return string(encoded)
 }
 
-func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, err error) {
-	requestID, attempts, retries := "", 0, 0
+func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, proxyStatus int, contextWindowExceeded bool, err error) {
 	if trace != nil {
-		trace.mu.Lock()
-		requestID = trace.event.RequestID
-		attempts = len(trace.metadata.Attempts)
-		for _, attempt := range trace.metadata.Attempts {
-			if attempt.Retry {
-				retries++
-			}
-		}
-		trace.mu.Unlock()
+		return
 	}
 	upstreamStatus := 0
 	var statusErr *upstreamStatusError
@@ -948,8 +1031,11 @@ func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model strin
 		upstreamStatus = statusErr.StatusCode
 	}
 	completionState, failureKind := classifyFailure(err)
-	fmt.Printf("[ERROR] Upstream request failed request_id=%s provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s attempts=%d retries=%d\n",
-		requestID, cfg.DetectProvider(), model, streaming, fiber.StatusBadGateway, upstreamStatus, completionState, failureKind, attempts, retries)
+	if contextWindowExceeded {
+		completionState, failureKind = completionUpstreamError, failureContextWindowExceeded
+	}
+	fmt.Printf("[ERROR] Upstream request failed provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s context_window_exceeded=%t retryable=%t\n",
+		cfg.DetectProvider(), model, streaming, proxyStatus, upstreamStatus, completionState, failureKind, contextWindowExceeded, !contextWindowExceeded)
 }
 
 func handleCountTokens(c *fiber.Ctx, cfg *config.Config) error {

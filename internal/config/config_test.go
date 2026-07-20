@@ -108,6 +108,64 @@ func TestDiagnosticsConfig(t *testing.T) {
 	}
 }
 
+func TestContextWindowRewriteConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.ContextWindowRewriteEnabled || cfg.ContextWindowRewriteStatus != DefaultContextWindowRewriteStatus || cfg.ContextWindowPatternsMode != DefaultContextWindowPatternsMode {
+		t.Fatalf("unexpected default context-window config: %#v", cfg)
+	}
+	if len(cfg.EffectiveContextWindowErrorPatterns()) <= len(cfg.ContextWindowErrorPatterns) {
+		t.Fatalf("expected built-in context-window patterns, got %#v", cfg.EffectiveContextWindowErrorPatterns())
+	}
+}
+
+func TestContextWindowRewriteConfigOverrides(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("CONTEXT_WINDOW_REWRITE_ENABLED", "false")
+	t.Setenv("CONTEXT_WINDOW_REWRITE_STATUS", "400")
+	t.Setenv("CONTEXT_WINDOW_ERROR_PATTERNS", " custom one , ,custom two ")
+	t.Setenv("CONTEXT_WINDOW_ERROR_PATTERNS_MODE", "override")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ContextWindowRewriteEnabled || cfg.ContextWindowRewriteStatus != 400 || cfg.ContextWindowPatternsMode != "override" {
+		t.Fatalf("unexpected overridden context-window config: %#v", cfg)
+	}
+	patterns := cfg.EffectiveContextWindowErrorPatterns()
+	if len(patterns) != 2 || patterns[0] != "custom one" || patterns[1] != "custom two" {
+		t.Fatalf("unexpected patterns: %#v", patterns)
+	}
+}
+
+func TestContextWindowRewriteInvalidConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("CONTEXT_WINDOW_REWRITE_STATUS", "502")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected invalid context-window rewrite status error")
+	}
+
+	t.Setenv("CONTEXT_WINDOW_REWRITE_STATUS", "413")
+	t.Setenv("CONTEXT_WINDOW_ERROR_PATTERNS_MODE", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected invalid context-window patterns mode error")
+	}
+
+	t.Setenv("CONTEXT_WINDOW_ERROR_PATTERNS_MODE", "override")
+	t.Setenv("CONTEXT_WINDOW_ERROR_PATTERNS", " , ")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected empty override patterns error")
+	}
+}
+
 func TestInvalidConfigOverrides(t *testing.T) {
 t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
@@ -188,6 +246,42 @@ func TestModelOverrides(t *testing.T) {
 				t.Errorf("HaikuModel = %q, want %q", cfg.HaikuModel, tt.expectedUsed)
 			}
 		})
+	}
+}
+
+func TestModelDefaultsAndEffortModels(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("ANTHROPIC_EFFORT_LIGHT_MODEL", "gpt-5.6-luna-light")
+	t.Setenv("ANTHROPIC_EFFORT_LOW_MODEL", "gpt-5.6-luna-low")
+	t.Setenv("ANTHROPIC_EFFORT_MAX_MODEL", "gpt-5.6-sol-max")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.OpusModel != "gpt-5.6-sol" || cfg.SonnetModel != "gpt-5.6-terra" || cfg.HaikuModel != "gpt-5.6-luna" {
+		t.Fatalf("unexpected default models: opus=%q sonnet=%q haiku=%q", cfg.OpusModel, cfg.SonnetModel, cfg.HaikuModel)
+	}
+	if cfg.EffortModels["low"] != "gpt-5.6-luna-low" || cfg.EffortModels["light"] != "gpt-5.6-luna-light" || cfg.EffortModels["max"] != "gpt-5.6-sol-max" {
+		t.Fatalf("unexpected effort models: %#v", cfg.EffortModels)
+	}
+	if cfg.DisableParallelToolCalls {
+		t.Fatal("DisableParallelToolCalls = true, want default false so GPT tool compatibility is explicitly opt-in")
+	}
+}
+
+func TestToolCompatibilityFlagIsOptIn(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("OPENAI_DISABLE_PARALLEL_TOOL_CALLS", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.DisableParallelToolCalls {
+		t.Fatal("DisableParallelToolCalls = false, want true when explicitly configured")
 	}
 }
 

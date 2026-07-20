@@ -98,7 +98,14 @@ func TestHandleMessagesCapturesFailedUpstreamResponseWithoutRetryingContextError
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key", DiagnosticsCaptureContent: true}
+	cfg := &config.Config{
+		OpenAIBaseURL:                upstream.URL,
+		OpenAIAPIKey:                "secret-key",
+		DiagnosticsCaptureContent:   true,
+		ContextWindowRewriteEnabled: true,
+		ContextWindowRewriteStatus:  config.DefaultContextWindowRewriteStatus,
+		ContextWindowPatternsMode:   config.DefaultContextWindowPatternsMode,
+	}
 	app := fiber.New()
 	app.Use(requestIDMiddleware)
 	setupClaudeEndpoints(app, cfg, store)
@@ -110,13 +117,27 @@ func TestHandleMessagesCapturesFailedUpstreamResponseWithoutRetryingContextError
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != fiber.StatusBadGateway || calls != 1 {
-		t.Fatalf("status=%d upstream calls=%d, want 502 and one call", resp.StatusCode, calls)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || calls != 1 {
+		t.Fatalf("status=%d upstream calls=%d, want 413 and one call", resp.StatusCode, calls)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "context_window_exceeded") || !strings.Contains(string(body), "retryable") {
+		t.Fatalf("response body does not explain context-window failure: %s", body)
 	}
 	requestID := resp.Header.Get("X-Request-ID")
 	event := awaitDiagnosticEvent(t, store, requestID)
-	if event.AttemptCount != 1 || event.RetryCount != 0 {
-		t.Fatalf("context-window diagnostics retried: %#v", event)
+	if event.AttemptCount != 1 || event.RetryCount != 0 || event.StatusCode != http.StatusRequestEntityTooLarge || event.FailureKind != failureContextWindowExceeded {
+		t.Fatalf("context-window diagnostics = %#v, want one non-retried 413 failure", event)
+	}
+	var metadata diagnosticsMetadata
+	if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Attempts) != 1 || metadata.Attempts[0].StatusCode != http.StatusBadGateway {
+		t.Fatalf("attempt metadata = %#v, want original upstream 502", metadata.Attempts)
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -132,6 +153,92 @@ func TestHandleMessagesCapturesFailedUpstreamResponseWithoutRetryingContextError
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("missing captured upstream error response")
+}
+
+func TestHandleMessagesContextWindowRewriteConfiguration(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		cfg        func(*config.Config)
+		wantStatus int
+		wantKind   string
+	}{
+		{
+			name: "disabled keeps legacy 502",
+			body: `{"error":{"message":"input exceeds context window"}}`,
+			cfg: func(cfg *config.Config) {
+				cfg.ContextWindowRewriteEnabled = false
+			},
+			wantStatus: fiber.StatusBadGateway,
+			wantKind:   failureUpstreamStatus,
+		},
+		{
+			name: "status override",
+			body: `{"error":{"message":"input exceeds context window"}}`,
+			cfg: func(cfg *config.Config) {
+				cfg.ContextWindowRewriteStatus = fiber.StatusBadRequest
+			},
+			wantStatus: fiber.StatusBadRequest,
+			wantKind:   failureContextWindowExceeded,
+		},
+		{
+			name: "unrelated upstream 502 stays 502",
+			body: `{"error":{"message":"temporary gateway failure"}}`,
+			wantStatus: fiber.StatusBadGateway,
+			wantKind:   failureUpstreamStatus,
+		},
+		{
+			name: "custom override pattern matches",
+			body: `{"error":{"message":"model prompt is much too enormous"}}`,
+			cfg: func(cfg *config.Config) {
+				cfg.ContextWindowPatternsMode = "override"
+				cfg.ContextWindowErrorPatterns = []string{"too enormous"}
+			},
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantKind:   failureContextWindowExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer upstream.Close()
+
+			store := openDiagnosticsTestStore(t)
+			cfg := &config.Config{
+				OpenAIBaseURL:                upstream.URL,
+				OpenAIAPIKey:                "secret-key",
+				ContextWindowRewriteEnabled: true,
+				ContextWindowRewriteStatus:  config.DefaultContextWindowRewriteStatus,
+				ContextWindowPatternsMode:   config.DefaultContextWindowPatternsMode,
+			}
+			if tt.cfg != nil {
+				tt.cfg(cfg)
+			}
+			app := fiber.New()
+			app.Use(requestIDMiddleware)
+			setupClaudeEndpoints(app, cfg, store)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"test"}]}`))
+			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status=%d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
+			if event.FailureKind != tt.wantKind {
+				t.Fatalf("failure kind=%q, want %q; event=%#v", event.FailureKind, tt.wantKind, event)
+			}
+		})
+	}
 }
 
 func TestHandleMessagesRecordsRedactedUpstreamRequest(t *testing.T) {
@@ -266,7 +373,7 @@ func TestHandleMessagesMalformedBodyStoresMetadataOnly(t *testing.T) {
 
 func TestDebugLogsAreAbsentWhenDisabled(t *testing.T) {
 	app := fiber.New()
-	setupDiagnosticsEndpoints(app, nil)
+	setupDiagnosticsEndpoints(app, nil, &config.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	resp, err := app.Test(req)
@@ -282,7 +389,7 @@ func TestDebugLogsRejectForwardedLoopbackFromRemote(t *testing.T) {
 	store := openDiagnosticsTestStore(t)
 
 	app := fiber.New()
-	setupDiagnosticsEndpoints(app, store)
+	setupDiagnosticsEndpoints(app, store, &config.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/debug/logs/events", nil)
 	req.RemoteAddr = "203.0.113.7:1234"
 	req.Header.Set("X-Forwarded-For", "127.0.0.1")
@@ -304,7 +411,7 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 		}
 	}
 	app := fiber.New()
-	setupDiagnosticsEndpoints(app, store)
+	setupDiagnosticsEndpoints(app, store, &config.Config{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -446,7 +553,7 @@ func TestDiagnosticsAnalyticsRangesExportAndPrivacy(t *testing.T) {
 	// rendering are all part of the local-page contract.
 	for _, required := range []string{
 		`html lang="zh-CN"`, "代理诊断", "刷新", "所有保留记录", "筛选请求", "请求主从视图", "请求列表", "请求详情", "显示原始记录 JSON", "本地内容", "确定要删除所有诊断记录吗？", "已完成",
-		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", `id="pageSize"`, "每页显示", `<option value="10" selected>10</option>`, `<option value="20">20</option>`, `<option value="30">30</option>`, "let pageSize=10", "[10,20,30].includes(size)", "pageSize=size;offset=0;resetDetail();load()", "API 密钥", "by_api_key", "breakdown('apiKeys',analytics.by_api_key||[],localized)", `id="apiKeyFilter"`, `id="apiKeyOptions"`, "data-api-key=\"key-2\"", "只看其他 key", "api_key_label", "api_key_label_not", "datalist('apiKeyOptions',analytics.by_api_key||[])", "eventsParams.set('limit',String(pageSize))", "eventsParams.set('offset',String(requestedOffset))", "const requestedOffset=offset", "offset!==requestedOffset", "master-detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,1.1fr)", "@media(max-width:1200px) and (min-width:961px)", "detailStatus", "status-badge", `id="autoRefresh"`, "自动刷新", `id="quickFilters"`, `aria-label="快捷筛选"`, "data-state=\"upstream_error\"", "data-stream=\"true\"", "detailConclusion", "failureExplanations", "copyRequestID", "navigator.clipboard.writeText", "请求 ID 已复制", "setInterval(()=>{if(!document.hidden&&!loading)load()},interval)", "prefers-reduced-motion", "role','tablist'", "role','tab'", "role','tabpanel'", "ArrowRight", "ArrowLeft", "function localized(value){return value==='unavailable'||!value?'不可用':String(value)}", "breakdown('models',analytics.by_model||[],localized)", "breakdown('providers',analytics.by_provider||[],localized)", "completion_state", "request_id", "window.__diagnosticsToken", "X-Diagnostics-Token", "/debug/logs/'+encodeURIComponent(selectedID)+'/content", "page.total", "总数暂不可用", "createElementNS('http://www.w3.org/2000/svg'", "输入与输出令牌趋势", "Token 与报文长度趋势", "Token / 报文长度占比", "长度与 token 相关性", "模型消耗对比", "renderByteRatios(analytics)", "renderCorrelation(analytics.token_byte_correlation)", "modelConsumption(analytics.model_consumption||[])", "lengthChart(analytics.hourly_timeline,lastVisibleRows)", "function kb(value)", "请求 KB=Claude 入站请求", "response_total_bytes", "上游响应+返回给 Claude 的响应", "bytes_per_input_token", "token_byte_correlation", "model_consumption", "textContent", "/debug/logs/analytics",
+		"Intl.DateTimeFormat('zh-CN'", "params.set('until',now.toISOString())", "const now=new Date()", `id="pageSize"`, "每页显示", `<option value="10" selected>10</option>`, `<option value="20">20</option>`, `<option value="30">30</option>`, "let pageSize=10", "[10,20,30].includes(size)", "pageSize=size;offset=0;resetDetail();load()", "API 密钥", "by_api_key", "breakdown('apiKeys',analytics.by_api_key||[],localized)", `id="apiKeyFilter"`, `id="apiKeyOptions"`, `id="toggleFilters"`, `aria-controls="filterControls"`, `aria-expanded="true"`, `id="filterSummary"`, `data-collapsed="false"`, "function updateFilterSummary()", "function setFiltersCollapsed(collapsed)", "expandedBreakdowns", "显示全部", "收起", "data-api-key=\"key-2\"", "只看其他 key", "api_key_label", "api_key_label_not", "datalist('apiKeyOptions',analytics.by_api_key||[])", "eventsParams.set('limit',String(pageSize))", "eventsParams.set('offset',String(requestedOffset))", "const requestedOffset=offset", "offset!==requestedOffset", "master-detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,1.1fr)", "@media(max-width:1200px) and (min-width:961px)", "detailStatus", "status-badge", `id="autoRefresh"`, "自动刷新", `id="quickFilters"`, `aria-label="快捷筛选"`, "data-state=\"upstream_error\"", "data-stream=\"true\"", "detailConclusion", "failureExplanations", "copyRequestID", "navigator.clipboard.writeText", "请求 ID 已复制", "setInterval(()=>{if(!document.hidden&&!loading)load()},interval)", "prefers-reduced-motion", "role','tablist'", "role','tab'", "role','tabpanel'", "ArrowRight", "ArrowLeft", "function localized(value){return value==='unavailable'||!value?'不可用':String(value)}", "breakdown('models',analytics.by_model||[],localized)", "breakdown('providers',analytics.by_provider||[],localized)", "completion_state", "request_id", "window.__diagnosticsToken", "X-Diagnostics-Token", "/debug/logs/'+encodeURIComponent(selectedID)+'/content", "page.total", "总数暂不可用", "createElementNS('http://www.w3.org/2000/svg'", "输入与输出令牌趋势", "Token 与报文长度趋势", "Token / 报文长度占比", "长度与 token 相关性", "模型消耗对比", "renderByteRatios(analytics)", "renderCorrelation(analytics.token_byte_correlation)", "modelConsumption(analytics.model_consumption||[])", "lengthChart(analytics.hourly_timeline,lastVisibleRows)", "function kb(value)", "请求 KB=Claude 入站请求", "response_total_bytes", "上游响应+返回给 Claude 的响应", "bytes_per_input_token", "token_byte_correlation", "model_consumption", "textContent", "/debug/logs/analytics",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("dashboard missing %q", required)

@@ -33,7 +33,21 @@ const (
 	DefaultDiagnosticsRetention        = 72 * time.Hour
 	DefaultDiagnosticsContentRetention = time.Hour
 	DefaultDiagnosticsBusyTimeout      = 5 * time.Second
+	DefaultContextWindowRewriteStatus  = 413
+	DefaultContextWindowPatternsMode   = "append"
 )
+
+var DefaultContextWindowErrorPatterns = []string{
+	"exceeds the context window",
+	"exceeds context window",
+	"context window exceeded",
+	"context_window_exceeded",
+	"maximum context length",
+	"context length exceeded",
+	"input is too long",
+	"too many tokens",
+	"tokens exceed",
+}
 
 // CacheKey uniquely identifies a (provider, model) combination for capability caching
 // Using a struct as map key provides type safety and zero collision risk
@@ -80,6 +94,20 @@ type Config struct {
 	OpusModel   string
 	SonnetModel string
 	HaikuModel  string
+	EffortModels map[string]string
+
+	// GPT/NewAPI tool calling compatibility
+	DisableParallelToolCalls bool
+
+	// Context-window error rewriting
+	ContextWindowRewriteEnabled bool
+	ContextWindowRewriteStatus  int
+	ContextWindowErrorPatterns  []string
+	ContextWindowPatternsMode   string
+
+	// Router settings
+	RouterConfigPath string
+	Router           *RouterManager
 
 	// Server settings
 	Host string
@@ -126,6 +154,11 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	routerPath := getEnvOrDefault("ROUTER_CONFIG_PATH", DefaultRouterConfigPath())
+	router, err := NewRouterManager(routerPath)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
 		OpenAIAPIKey:      apiKey,
 		OpenAIAPIKeyIndex: apiKeyIndex,
@@ -143,9 +176,23 @@ func Load() (*Config, error) {
 		DiagnosticsBusyTimeout:      getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
 
 		// Pattern-based routing (optional overrides)
-		OpusModel:   os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-		SonnetModel: os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL"),
-		HaikuModel:  os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+		OpusModel:    getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),
+		SonnetModel:  getEnvOrDefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"),
+		HaikuModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", "gpt-5.6-luna"),
+		EffortModels: loadEffortModels(),
+
+		// GPT/NewAPI tool calling compatibility
+		DisableParallelToolCalls: getEnvAsBoolOrDefault("OPENAI_DISABLE_PARALLEL_TOOL_CALLS", false),
+
+		// Context-window error rewriting
+		ContextWindowRewriteEnabled: getEnvAsBoolOrDefault("CONTEXT_WINDOW_REWRITE_ENABLED", true),
+		ContextWindowRewriteStatus:  getEnvAsIntOrDefault("CONTEXT_WINDOW_REWRITE_STATUS", DefaultContextWindowRewriteStatus),
+		ContextWindowErrorPatterns:  loadContextWindowErrorPatterns(),
+		ContextWindowPatternsMode:   strings.ToLower(strings.TrimSpace(getEnvOrDefault("CONTEXT_WINDOW_ERROR_PATTERNS_MODE", DefaultContextWindowPatternsMode))),
+
+		// Router settings
+		RouterConfigPath: routerPath,
+		Router:           router,
 
 		// Server settings
 		Host: getEnvOrDefault("HOST", "0.0.0.0"),
@@ -179,6 +226,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.DiagnosticsBusyTimeout <= 0 {
 		return nil, fmt.Errorf("DIAGNOSTICS_BUSY_TIMEOUT must be a positive Go duration")
+	}
+	if cfg.ContextWindowPatternsMode != "append" && cfg.ContextWindowPatternsMode != "override" {
+		return nil, fmt.Errorf("CONTEXT_WINDOW_ERROR_PATTERNS_MODE must be append or override")
+	}
+	if !isAllowedContextWindowRewriteStatus(cfg.ContextWindowRewriteStatus) {
+		return nil, fmt.Errorf("CONTEXT_WINDOW_REWRITE_STATUS must be one of 400, 413, 422")
+	}
+	if cfg.ContextWindowPatternsMode == "override" && len(cfg.ContextWindowErrorPatterns) == 0 {
+		return nil, fmt.Errorf("CONTEXT_WINDOW_ERROR_PATTERNS must not be empty when CONTEXT_WINDOW_ERROR_PATTERNS_MODE=override")
 	}
 	if cfg.DiagnosticsEnabled && strings.TrimSpace(cfg.DiagnosticsDBPath) == "" {
 		if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" {
@@ -265,6 +321,17 @@ func LoadWithDebug(debug bool) (*Config, error) {
 	return cfg, nil
 }
 
+func loadEffortModels() map[string]string {
+	models := map[string]string{}
+	for _, effort := range []string{"low", "light", "medium", "high", "xhigh", "max"} {
+		value := strings.TrimSpace(os.Getenv("ANTHROPIC_EFFORT_" + strings.ToUpper(effort) + "_MODEL"))
+		if value != "" {
+			models[effort] = value
+		}
+	}
+	return models
+}
+
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -278,6 +345,52 @@ func getEnvAsBoolOrDefault(key string, defaultValue bool) bool {
 		return defaultValue
 	}
 	return value == "true" || value == "1" || value == "yes"
+}
+
+func getEnvAsIntOrDefault(key string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func loadContextWindowErrorPatterns() []string {
+	value := strings.TrimSpace(os.Getenv("CONTEXT_WINDOW_ERROR_PATTERNS"))
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	patterns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		pattern := strings.TrimSpace(part)
+		if pattern != "" {
+			patterns = append(patterns, pattern)
+		}
+	}
+	return patterns
+}
+
+func isAllowedContextWindowRewriteStatus(status int) bool {
+	switch status {
+	case 400, 413, 422:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Config) EffectiveContextWindowErrorPatterns() []string {
+	custom := append([]string(nil), c.ContextWindowErrorPatterns...)
+	if c.ContextWindowPatternsMode == "override" {
+		return custom
+	}
+	patterns := append([]string(nil), DefaultContextWindowErrorPatterns...)
+	return append(patterns, custom...)
 }
 
 func getEnvAsDurationOrDefault(key string, defaultValue time.Duration) time.Duration {

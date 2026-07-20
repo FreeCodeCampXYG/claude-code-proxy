@@ -31,9 +31,10 @@ const (
 	completionInvalidResponse    = "invalid_response"
 	completionLocalAuthentication = "local_authentication"
 
-	failureUpstreamError        = "upstream_error"
-	failureUpstreamStatus       = "upstream_status"
-	failureUpstreamRead         = "upstream_read"
+	failureUpstreamError          = "upstream_error"
+	failureUpstreamStatus         = "upstream_status"
+	failureContextWindowExceeded = "context_window_exceeded"
+	failureUpstreamRead           = "upstream_read"
 	failureUpstreamTruncated    = "upstream_truncated"
 	failureDownstreamWrite      = "downstream_write"
 	failureCanceled             = "canceled"
@@ -155,6 +156,19 @@ func (trace *diagnosticsTrace) setModel(model string, streaming bool) {
 	defer trace.mu.Unlock()
 	trace.event.Model = model
 	trace.event.Streaming = streaming
+}
+
+func (trace *diagnosticsTrace) setRouting(req *models.OpenAIRequest) {
+	if trace == nil || req == nil {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.event.IncomingEffort = req.IncomingEffort
+	trace.event.RoutedEffort = req.RoutedEffort
+	trace.event.RouteRule = req.RouteRule
+	trace.event.RouteModelOverridden = req.RouteModelOverridden
+	trace.event.RouteEffortOverridden = req.RouteEffortOverridden
 }
 
 func (trace *diagnosticsTrace) setMalformedBody(body []byte, contentType string, parseErr error) {
@@ -448,7 +462,7 @@ func newRequestID() string {
 	return fmt.Sprintf("req-%d", time.Now().UnixNano())
 }
 
-func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store) {
+func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store, cfg *config.Config) {
 	if store == nil {
 		return
 	}
@@ -458,6 +472,8 @@ func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store) {
 	group.Get("/", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, token) })
 	group.Get("/events", func(c *fiber.Ctx) error { return diagnosticsList(c, store) })
 	group.Get("/analytics", func(c *fiber.Ctx) error { return diagnosticsAnalytics(c, store) })
+	group.Get("/router-config", func(c *fiber.Ctx) error { return diagnosticsRouterConfig(c, cfg) })
+	group.Put("/router-config", func(c *fiber.Ctx) error { return diagnosticsSaveRouterConfig(c, cfg) })
 	group.Get("/export", func(c *fiber.Ctx) error { return diagnosticsExport(c, store) })
 	group.Delete("", func(c *fiber.Ctx) error { return diagnosticsClear(c, store) })
 	group.Delete("/", func(c *fiber.Ctx) error { return diagnosticsClear(c, store) })
@@ -584,28 +600,33 @@ func diagnosticsAnalytics(c *fiber.Ctx, store *diagnostics.Store) error {
 }
 
 type diagnosticsDetailView struct {
-	RequestID       string                 `json:"request_id"`
-	CreatedAt       time.Time              `json:"created_at"`
-	Method          string                 `json:"method,omitempty"`
-	Path            string                 `json:"path,omitempty"`
-	Provider        string                 `json:"provider,omitempty"`
-	APIKeyLabel     string                 `json:"api_key_label,omitempty"`
-	Model           string                 `json:"model,omitempty"`
-	StatusCode      int                    `json:"status_code,omitempty"`
-	Duration        time.Duration          `json:"duration,omitempty"`
-	Streaming       bool                   `json:"streaming"`
-	Error           string                 `json:"error,omitempty"`
-	AttemptCount    int                    `json:"attempt_count"`
-	RetryCount      int                    `json:"retry_count"`
-	InputTokens     int                    `json:"input_tokens"`
-	OutputTokens    int                    `json:"output_tokens"`
-	CacheReadInputTokens int                `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int            `json:"cache_creation_input_tokens"`
-	ChunkCount      int                    `json:"chunk_count"`
-	StopReason      string                 `json:"stop_reason,omitempty"`
-	CompletionState string                 `json:"completion_state,omitempty"`
-	FailureKind     string                 `json:"failure_kind,omitempty"`
-	Metadata        diagnosticsMetadata    `json:"metadata"`
+	RequestID                 string              `json:"request_id"`
+	CreatedAt                 time.Time           `json:"created_at"`
+	Method                    string              `json:"method,omitempty"`
+	Path                      string              `json:"path,omitempty"`
+	Provider                  string              `json:"provider,omitempty"`
+	APIKeyLabel               string              `json:"api_key_label,omitempty"`
+	Model                     string              `json:"model,omitempty"`
+	StatusCode                int                 `json:"status_code,omitempty"`
+	Duration                  time.Duration       `json:"duration,omitempty"`
+	Streaming                 bool                `json:"streaming"`
+	Error                     string              `json:"error,omitempty"`
+	AttemptCount              int                 `json:"attempt_count"`
+	RetryCount                int                 `json:"retry_count"`
+	InputTokens               int                 `json:"input_tokens"`
+	OutputTokens              int                 `json:"output_tokens"`
+	CacheReadInputTokens      int                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens  int                 `json:"cache_creation_input_tokens"`
+	ChunkCount                int                 `json:"chunk_count"`
+	StopReason                string              `json:"stop_reason,omitempty"`
+	CompletionState           string              `json:"completion_state,omitempty"`
+	FailureKind               string              `json:"failure_kind,omitempty"`
+	IncomingEffort            string              `json:"incoming_effort,omitempty"`
+	RoutedEffort              string              `json:"routed_effort,omitempty"`
+	RouteRule                 string              `json:"route_rule,omitempty"`
+	RouteModelOverridden      bool                `json:"route_model_overridden"`
+	RouteEffortOverridden     bool                `json:"route_effort_overridden"`
+	Metadata                  diagnosticsMetadata `json:"metadata"`
 }
 
 func diagnosticsDetailViewFor(event diagnostics.Event) diagnosticsDetailView {
@@ -616,9 +637,32 @@ func diagnosticsDetailViewFor(event diagnostics.Event) diagnosticsDetailView {
 		InputTokens: event.InputTokens, OutputTokens: event.OutputTokens, CacheReadInputTokens: event.CacheReadInputTokens,
 		CacheCreationInputTokens: event.CacheCreationInputTokens, ChunkCount: event.ChunkCount, StopReason: event.StopReason,
 		CompletionState: event.CompletionState, FailureKind: event.FailureKind,
+		IncomingEffort: event.IncomingEffort, RoutedEffort: event.RoutedEffort, RouteRule: event.RouteRule,
+		RouteModelOverridden: event.RouteModelOverridden, RouteEffortOverridden: event.RouteEffortOverridden,
 	}
 	_ = json.Unmarshal(event.Metadata, &view.Metadata)
 	return view
+}
+
+func diagnosticsRouterConfig(c *fiber.Ctx, cfg *config.Config) error {
+	if cfg == nil || cfg.Router == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "router manager is not available"})
+	}
+	return c.JSON(fiber.Map{"path": cfg.Router.Path(), "config": cfg.Router.Snapshot()})
+}
+
+func diagnosticsSaveRouterConfig(c *fiber.Ctx, cfg *config.Config) error {
+	if cfg == nil || cfg.Router == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "router manager is not available"})
+	}
+	var routerConfig config.RouterConfig
+	if err := c.BodyParser(&routerConfig); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := cfg.Router.Save(routerConfig); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"path": cfg.Router.Path(), "config": cfg.Router.Snapshot()})
 }
 
 func diagnosticsDetail(c *fiber.Ctx, store *diagnostics.Store) error {

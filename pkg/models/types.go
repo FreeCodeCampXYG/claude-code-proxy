@@ -88,6 +88,12 @@ type OpenAIRequest struct {
 	ReasoningEffort     string                 `json:"reasoning_effort,omitempty"` // OpenAI Chat Completions reasoning (GPT-5 models)
 	Tools               []OpenAITool           `json:"tools,omitempty"`
 	ToolChoice          interface{}            `json:"tool_choice,omitempty"` // Force tool usage: "auto", "required", or specific tool
+	ParallelToolCalls   *bool                  `json:"parallel_tool_calls,omitempty"`
+	IncomingEffort      string                 `json:"-"`
+	RoutedEffort        string                 `json:"-"`
+	RouteRule           string                 `json:"-"`
+	RouteModelOverridden bool                  `json:"-"`
+	RouteEffortOverridden bool                 `json:"-"`
 }
 
 // OpenAITool represents a tool in OpenAI format

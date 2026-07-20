@@ -116,7 +116,7 @@ func Start(cfg *config.Config) error {
 
 	// Claude API endpoints
 	setupClaudeEndpoints(app, cfg, diagnosticsStore)
-	setupDiagnosticsEndpoints(app, diagnosticsStore)
+	setupDiagnosticsEndpoints(app, diagnosticsStore, cfg)
 
 	// Graceful shutdown
 	go func() {
