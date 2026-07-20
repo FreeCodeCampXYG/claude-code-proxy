@@ -162,6 +162,11 @@ type Event struct {
 	IncomingEffort           string          `json:"incoming_effort,omitempty"`
 	RoutedEffort             string          `json:"routed_effort,omitempty"`
 	RouteRule                string          `json:"route_rule,omitempty"`
+	IncomingModel            string          `json:"incoming_model,omitempty"`
+	RouteTextChars           int             `json:"route_text_chars"`
+	HasLastToolUse           bool            `json:"has_last_tool_use"`
+	HasLastToolResult        bool            `json:"has_last_tool_result"`
+	RouterEnabled            bool            `json:"router_enabled"`
 	RouteModelOverridden     bool            `json:"route_model_overridden"`
 	RouteEffortOverridden    bool            `json:"route_effort_overridden"`
 }
@@ -201,6 +206,11 @@ type EventSummary struct {
 	IncomingEffort           string        `json:"incoming_effort,omitempty"`
 	RoutedEffort             string        `json:"routed_effort,omitempty"`
 	RouteRule                string        `json:"route_rule,omitempty"`
+	IncomingModel            string        `json:"incoming_model,omitempty"`
+	RouteTextChars           int           `json:"route_text_chars"`
+	HasLastToolUse           bool          `json:"has_last_tool_use"`
+	HasLastToolResult        bool          `json:"has_last_tool_result"`
+	RouterEnabled            bool          `json:"router_enabled"`
 	RouteModelOverridden     bool          `json:"route_model_overridden"`
 	RouteEffortOverridden    bool          `json:"route_effort_overridden"`
 }
@@ -208,6 +218,8 @@ type EventSummary struct {
 type Query struct {
 	RequestID       string
 	Model           string
+	IncomingModel   string
+	RouteRule       string
 	Provider        string
 	APIKeyLabel     string
 	APIKeyLabelNot  string
@@ -249,6 +261,7 @@ type Analytics struct {
 	TokenByteCorrelation    TokenByteCorrelation `json:"token_byte_correlation"`
 	ModelConsumption        []ModelConsumption   `json:"model_consumption"`
 	ByModel                 []AnalyticsCount `json:"by_model"`
+	ByIncomingModel         []AnalyticsCount `json:"by_incoming_model"`
 	ByProvider              []AnalyticsCount `json:"by_provider"`
 	ByAPIKey                []AnalyticsCount `json:"by_api_key"`
 	ByCompletionState       []AnalyticsCount `json:"by_completion_state"`
@@ -442,6 +455,11 @@ func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, e
 			return err
 		}
 	}
+	if version > 0 && version < 7 {
+		if err := store.migrate(ctx, migrateV6ToV7Statements, "v6 to v7"); err != nil {
+			return err
+		}
+	}
 	return store.validateAndRepairSchemaV5(ctx)
 }
 
@@ -470,6 +488,7 @@ var requiredSchemaV5Columns = []string{
 	"canceled", "truncated", "api_key_label", "task_hash", "claude_request_bytes",
 	"upstream_request_bytes", "upstream_response_bytes", "claude_response_bytes", "message_count", "tool_count",
 	"incoming_effort", "routed_effort", "route_rule", "route_model_overridden", "route_effort_overridden",
+	"incoming_model", "route_text_chars", "has_last_tool_use", "has_last_tool_result", "router_enabled",
 }
 
 var requiredSchemaV5Indexes = map[string]struct {
@@ -765,8 +784,9 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
 			upstream_response_bytes, claude_response_bytes, message_count, tool_count,
-			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden,
+			incoming_model, route_text_chars, has_last_tool_use, has_last_tool_result, router_enabled
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
@@ -776,7 +796,8 @@ func (store *Store) insertEvent(ctx context.Context, executor sqlExecutor, event
 		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
 		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
 		event.MessageCount, event.ToolCount, event.IncomingEffort, event.RoutedEffort, event.RouteRule,
-		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden))
+		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden), event.IncomingModel,
+		event.RouteTextChars, boolInt(event.HasLastToolUse), boolInt(event.HasLastToolResult), boolInt(event.RouterEnabled))
 	if err != nil {
 		return fmt.Errorf("insert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -792,8 +813,9 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 			canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
 			upstream_response_bytes, claude_response_bytes, message_count, tool_count,
-			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden,
+			incoming_model, route_text_chars, has_last_tool_use, has_last_tool_result, router_enabled
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			created_at=excluded.created_at, updated_at=excluded.updated_at, method=excluded.method,
 			path=excluded.path, provider=excluded.provider, model=excluded.model,
@@ -813,7 +835,9 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 			message_count=excluded.message_count, tool_count=excluded.tool_count,
 			incoming_effort=excluded.incoming_effort, routed_effort=excluded.routed_effort,
 			route_rule=excluded.route_rule, route_model_overridden=excluded.route_model_overridden,
-			route_effort_overridden=excluded.route_effort_overridden`,
+			route_effort_overridden=excluded.route_effort_overridden, incoming_model=excluded.incoming_model,
+				route_text_chars=excluded.route_text_chars, has_last_tool_use=excluded.has_last_tool_use,
+				has_last_tool_result=excluded.has_last_tool_result, router_enabled=excluded.router_enabled`,
 		event.RequestID, toMillis(event.CreatedAt), toMillis(event.UpdatedAt), event.Method,
 		event.Path, event.Provider, event.Model, event.StatusCode, event.Duration.Milliseconds(),
 		boolInt(event.Streaming), event.Error, nullableBytes(event.RequestBody), nullableBytes(event.ResponseBody),
@@ -823,7 +847,8 @@ func (store *Store) upsertEvent(ctx context.Context, executor sqlExecutor, event
 		boolInt(event.Truncated), event.APIKeyLabel, event.TaskHash, event.ClaudeRequestBytes,
 		event.UpstreamRequestBytes, event.UpstreamResponseBytes, event.ClaudeResponseBytes,
 		event.MessageCount, event.ToolCount, event.IncomingEffort, event.RoutedEffort, event.RouteRule,
-		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden))
+		boolInt(event.RouteModelOverridden), boolInt(event.RouteEffortOverridden), event.IncomingModel,
+		event.RouteTextChars, boolInt(event.HasLastToolUse), boolInt(event.HasLastToolResult), boolInt(event.RouterEnabled))
 	if err != nil {
 		return fmt.Errorf("upsert diagnostics event %q: %w", event.RequestID, err)
 	}
@@ -1066,14 +1091,16 @@ const eventColumns = `request_id, created_at, updated_at, method, path, provider
 	cache_creation_input_tokens, chunk_count, stop_reason, completion_state, failure_kind,
 	canceled, truncated, api_key_label, task_hash, claude_request_bytes, upstream_request_bytes,
 	upstream_response_bytes, claude_response_bytes, message_count, tool_count,
-		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden`
+		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden,
+		incoming_model, route_text_chars, has_last_tool_use, has_last_tool_result, router_enabled`
 
 const summaryColumns = `request_id, created_at, updated_at, method, path, provider, model,
 	status_code, duration_ms, streaming, error, attempt_count, retry_count, input_tokens,
 	output_tokens, cache_read_input_tokens, cache_creation_input_tokens, chunk_count, stop_reason,
 	completion_state, failure_kind, canceled, truncated, api_key_label, task_hash, claude_request_bytes,
 	upstream_request_bytes, upstream_response_bytes, claude_response_bytes, message_count, tool_count,
-		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden`
+		incoming_effort, routed_effort, route_rule, route_model_overridden, route_effort_overridden,
+		incoming_model, route_text_chars, has_last_tool_use, has_last_tool_result, router_enabled`
 
 func (store *Store) Detail(ctx context.Context, requestID string) (Event, error) {
 	return scanEvent(store.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM diagnostics_events WHERE request_id = ?", requestID))
@@ -1157,6 +1184,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		Since:                query.Since,
 		Until:                query.Until,
 		ByModel:              make([]AnalyticsCount, 0),
+		ByIncomingModel:      make([]AnalyticsCount, 0),
 		ByProvider:           make([]AnalyticsCount, 0),
 		ByAPIKey:             make([]AnalyticsCount, 0),
 		ByCompletionState:    make([]AnalyticsCount, 0),
@@ -1168,7 +1196,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		TaskGroups:           make([]TaskGroup, 0),
 		TokenByteCorrelation: TokenByteCorrelation{Status: "insufficient_samples"},
 	}
-	models, providers, keys, states := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
+	models, incomingModels, providers, keys, states := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	incomingEfforts, routedEfforts, routeRules := map[string]int{}, map[string]int{}, map[string]int{}
 	hours, tasks := map[int64]*AnalyticsHour{}, map[string]int{}
 	modelConsumption := map[string]*ModelConsumption{}
@@ -1204,6 +1232,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 		latencyTotal += latency
 		modelName := emptyLabel(event.Model)
 		models[modelName]++
+		incomingModels[emptyLabel(event.IncomingModel)]++
 		providers[emptyLabel(event.Provider)]++
 		keys[emptyLabel(event.APIKeyLabel)]++
 		states[emptyLabel(event.CompletionState)]++
@@ -1252,6 +1281,7 @@ func (store *Store) Analytics(ctx context.Context, query Query) (Analytics, erro
 	}
 	result.TokenByteCorrelation = tokenByteCorrelation(inputTokens, requestBytes, outputTokens, responseBytes, totalTokensValues, totalBytesValues)
 	result.ByModel = sortedCounts(models)
+	result.ByIncomingModel = sortedCounts(incomingModels)
 	result.ByProvider = sortedCounts(providers)
 	result.ByAPIKey = sortedCounts(keys)
 	result.ByCompletionState = sortedCounts(states)
@@ -1362,6 +1392,8 @@ func buildWhere(query Query) (string, []any) {
 	var args []any
 	if query.RequestID != "" { clauses = append(clauses, "request_id = ?"); args = append(args, query.RequestID) }
 	if query.Model != "" { clauses = append(clauses, "model = ?"); args = append(args, query.Model) }
+	if query.IncomingModel != "" { clauses = append(clauses, "incoming_model = ?"); args = append(args, query.IncomingModel) }
+	if query.RouteRule != "" { clauses = append(clauses, "route_rule = ?"); args = append(args, query.RouteRule) }
 	if query.Provider != "" { clauses = append(clauses, "provider = ?"); args = append(args, query.Provider) }
 	if query.APIKeyLabel != "" {
 		clauses = append(clauses, "api_key_label = ?")
@@ -1392,7 +1424,7 @@ type scanner interface { Scan(dest ...any) error }
 func scanEvent(source scanner) (Event, error) {
 	var event Event
 	var createdAt, updatedAt, durationMS int64
-	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden int
+	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden, hasLastToolUse, hasLastToolResult, routerEnabled int
 	var requestBody, responseBody, metadata []byte
 	err := source.Scan(&event.RequestID, &createdAt, &updatedAt, &event.Method, &event.Path, &event.Provider,
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &requestBody, &responseBody,
@@ -1401,12 +1433,14 @@ func scanEvent(source scanner) (Event, error) {
 		&event.CompletionState, &event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
 		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
 		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount, &event.IncomingEffort, &event.RoutedEffort,
-		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden)
+		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden, &event.IncomingModel,
+		&event.RouteTextChars, &hasLastToolUse, &hasLastToolResult, &routerEnabled)
 	if err != nil { return Event{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
 	event.Canceled, event.Truncated = canceled != 0, truncated != 0
 	event.RouteModelOverridden, event.RouteEffortOverridden = routeModelOverridden != 0, routeEffortOverridden != 0
+	event.HasLastToolUse, event.HasLastToolResult, event.RouterEnabled = hasLastToolUse != 0, hasLastToolResult != 0, routerEnabled != 0
 	event.RequestBody, event.ResponseBody, event.Metadata = cloneRaw(requestBody), cloneRaw(responseBody), cloneRaw(metadata)
 	return event, nil
 }
@@ -1414,7 +1448,7 @@ func scanEvent(source scanner) (Event, error) {
 func scanSummary(source scanner) (EventSummary, error) {
 	var event EventSummary
 	var createdAt, updatedAt, durationMS int64
-	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden int
+	var streaming, canceled, truncated, routeModelOverridden, routeEffortOverridden, hasLastToolUse, hasLastToolResult, routerEnabled int
 	err := source.Scan(&event.RequestID, &createdAt, &updatedAt, &event.Method, &event.Path, &event.Provider,
 		&event.Model, &event.StatusCode, &durationMS, &streaming, &event.Error, &event.AttemptCount,
 		&event.RetryCount, &event.InputTokens, &event.OutputTokens, &event.CacheReadInputTokens,
@@ -1422,12 +1456,14 @@ func scanSummary(source scanner) (EventSummary, error) {
 		&event.FailureKind, &canceled, &truncated, &event.APIKeyLabel, &event.TaskHash,
 		&event.ClaudeRequestBytes, &event.UpstreamRequestBytes, &event.UpstreamResponseBytes,
 		&event.ClaudeResponseBytes, &event.MessageCount, &event.ToolCount, &event.IncomingEffort, &event.RoutedEffort,
-		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden)
+		&event.RouteRule, &routeModelOverridden, &routeEffortOverridden, &event.IncomingModel,
+		&event.RouteTextChars, &hasLastToolUse, &hasLastToolResult, &routerEnabled)
 	if err != nil { return EventSummary{}, err }
 	event.CreatedAt, event.UpdatedAt = fromMillis(createdAt), fromMillis(updatedAt)
 	event.Duration, event.Streaming = time.Duration(durationMS)*time.Millisecond, streaming != 0
 	event.Canceled, event.Truncated = canceled != 0, truncated != 0
 	event.RouteModelOverridden, event.RouteEffortOverridden = routeModelOverridden != 0, routeEffortOverridden != 0
+	event.HasLastToolUse, event.HasLastToolResult, event.RouterEnabled = hasLastToolUse != 0, hasLastToolResult != 0, routerEnabled != 0
 	return event, nil
 }
 

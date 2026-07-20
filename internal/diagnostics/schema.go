@@ -1,6 +1,6 @@
 package diagnostics
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const createSchemaV5SQL = `
 CREATE TABLE diagnostics_events (
@@ -65,7 +65,7 @@ CREATE INDEX idx_diagnostics_content_created_at
 	ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary);
 CREATE INDEX idx_diagnostics_content_expires_at
 	ON diagnostics_content(expires_at, request_id);
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 `
 
 var migrateV1ToV2Statements = []string{
@@ -125,4 +125,13 @@ var migrateV5ToV6Statements = []string{
 	`ALTER TABLE diagnostics_events ADD COLUMN route_model_overridden INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE diagnostics_events ADD COLUMN route_effort_overridden INTEGER NOT NULL DEFAULT 0`,
 	`PRAGMA user_version = 6`,
+}
+
+var migrateV6ToV7Statements = []string{
+	`ALTER TABLE diagnostics_events ADD COLUMN incoming_model TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE diagnostics_events ADD COLUMN route_text_chars INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN has_last_tool_use INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN has_last_tool_result INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE diagnostics_events ADD COLUMN router_enabled INTEGER NOT NULL DEFAULT 0`,
+	`PRAGMA user_version = 7`,
 }

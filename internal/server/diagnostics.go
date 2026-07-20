@@ -168,6 +168,11 @@ func (trace *diagnosticsTrace) setRouting(req *models.OpenAIRequest) {
 	trace.event.IncomingEffort = req.IncomingEffort
 	trace.event.RoutedEffort = req.RoutedEffort
 	trace.event.RouteRule = req.RouteRule
+	trace.event.IncomingModel = req.IncomingModel
+	trace.event.RouteTextChars = req.RouteTextChars
+	trace.event.HasLastToolUse = req.HasLastToolUse
+	trace.event.HasLastToolResult = req.HasLastToolResult
+	trace.event.RouterEnabled = req.RouterEnabled
 	trace.event.RouteModelOverridden = req.RouteModelOverridden
 	trace.event.RouteEffortOverridden = req.RouteEffortOverridden
 }
@@ -554,7 +559,7 @@ func diagnosticsQuery(c *fiber.Ctx, defaultLimit int) (diagnostics.Query, error)
 		apiKeyLabel = ""
 	}
 	return diagnostics.Query{
-		RequestID: c.Query("request_id"), Model: c.Query("model"), Provider: c.Query("provider"),
+		RequestID: c.Query("request_id"), Model: c.Query("model"), IncomingModel: c.Query("incoming_model"), RouteRule: c.Query("route_rule"), Provider: c.Query("provider"),
 		APIKeyLabel: apiKeyLabel, APIKeyLabelNot: apiKeyLabelNot, CompletionState: c.Query("completion_state"), Streaming: streaming,
 		Since: since, Until: until, Limit: limit, Offset: offset,
 	}, nil
@@ -625,6 +630,11 @@ type diagnosticsDetailView struct {
 	IncomingEffort            string              `json:"incoming_effort,omitempty"`
 	RoutedEffort              string              `json:"routed_effort,omitempty"`
 	RouteRule                 string              `json:"route_rule,omitempty"`
+	IncomingModel             string              `json:"incoming_model,omitempty"`
+	RouteTextChars            int                 `json:"route_text_chars"`
+	HasLastToolUse            bool                `json:"has_last_tool_use"`
+	HasLastToolResult         bool                `json:"has_last_tool_result"`
+	RouterEnabled             bool                `json:"router_enabled"`
 	RouteModelOverridden      bool                `json:"route_model_overridden"`
 	RouteEffortOverridden     bool                `json:"route_effort_overridden"`
 	Metadata                  diagnosticsMetadata `json:"metadata"`
@@ -639,6 +649,8 @@ func diagnosticsDetailViewFor(event diagnostics.Event) diagnosticsDetailView {
 		CacheCreationInputTokens: event.CacheCreationInputTokens, ChunkCount: event.ChunkCount, StopReason: event.StopReason,
 		CompletionState: event.CompletionState, FailureKind: event.FailureKind,
 		IncomingEffort: event.IncomingEffort, RoutedEffort: event.RoutedEffort, RouteRule: event.RouteRule,
+		IncomingModel: event.IncomingModel, RouteTextChars: event.RouteTextChars,
+		HasLastToolUse: event.HasLastToolUse, HasLastToolResult: event.HasLastToolResult, RouterEnabled: event.RouterEnabled,
 		RouteModelOverridden: event.RouteModelOverridden, RouteEffortOverridden: event.RouteEffortOverridden,
 	}
 	_ = json.Unmarshal(event.Metadata, &view.Metadata)

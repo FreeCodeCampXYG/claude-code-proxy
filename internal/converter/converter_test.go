@@ -1,6 +1,8 @@
 package converter
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
@@ -779,6 +781,180 @@ func TestConvertMessagesWithComplexContent(t *testing.T) {
 			t.Errorf("Second tool name = %q, want %q", result[0].ToolCalls[1].Function.Name, "get_time")
 		}
 	})
+}
+
+func TestRouterCostAwareRouting(t *testing.T) {
+	cfg := routerTestConfig(t, config.RouterConfig{
+		Enabled:     true,
+		Defaults:    config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+		Simple:      config.RouterRule{Enabled: true, Model: "gpt-5.4", Effort: "low", MaxChars: 4000},
+		ToolUse:     config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+		ToolResult:  config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "low"},
+		LongContext: config.RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "medium", MinChars: 10000},
+	})
+
+	t.Run("historical tool_result does not poison later simple turn", func(t *testing.T) {
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model: "claude-sonnet-4",
+			Messages: []models.ClaudeMessage{
+				{Role: "user", Content: "read a file"},
+				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}},
+				{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "file content"}}},
+				{Role: "assistant", Content: "done"},
+				{Role: "user", Content: "2+2?"},
+			},
+		}, cfg)
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		assertRoute(t, req, "simple", "gpt-5.4", "low")
+	})
+
+	t.Run("immediate tool_result routes to tool_result", func(t *testing.T) {
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model: "claude-sonnet-4",
+			Messages: []models.ClaudeMessage{{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "test output"}}}},
+		}, cfg)
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		assertRoute(t, req, "tool_result", "gpt-5.5", "low")
+	})
+
+	t.Run("available tool schemas alone do not route to tool_use", func(t *testing.T) {
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model:    "claude-sonnet-4",
+			Messages: []models.ClaudeMessage{{Role: "user", Content: "hello"}},
+			Tools: []models.Tool{{
+				Name:        "read_file",
+				Description: "Read a file",
+				InputSchema: map[string]interface{}{"type": "object"},
+			}},
+		}, cfg)
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		assertRoute(t, req, "simple", "gpt-5.4", "low")
+	})
+
+	t.Run("long context beats simple and tool_result", func(t *testing.T) {
+		longCfg := config.RouterConfig{
+			Enabled:     true,
+			Defaults:    config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+			Simple:      config.RouterRule{Enabled: true, Model: "gpt-5.4", Effort: "low", MaxChars: 4000},
+			ToolUse:     config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+			ToolResult:  config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "low"},
+			LongContext: config.RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "medium", MinChars: 120},
+		}
+		longText := strings.Repeat("x", 140)
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model: "claude-sonnet-4",
+			Messages: []models.ClaudeMessage{{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": longText},
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "short output"},
+			}}},
+		}, routerTestConfig(t, longCfg))
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		assertRoute(t, req, "long_context", "gpt-5.6-terra", "medium")
+	})
+
+	t.Run("default fallback uses main workhorse", func(t *testing.T) {
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model:    "claude-sonnet-4",
+			Messages: []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("normal task ", 500)}},
+		}, cfg)
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		assertRoute(t, req, "default", "gpt-5.5", "medium")
+	})
+
+	t.Run("incoming sol model is preserved while effort follows content size", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			content    string
+			wantEffort string
+		}{
+			{name: "small", content: "hello", wantEffort: "low"},
+			{name: "medium", content: strings.Repeat("x", 5000), wantEffort: "medium"},
+			{name: "high", content: strings.Repeat("x", 130000), wantEffort: "high"},
+			{name: "xhigh", content: strings.Repeat("x", 310000), wantEffort: "xhigh"},
+			{name: "max", content: strings.Repeat("x", 810000), wantEffort: "max"},
+		}
+		for _, tt := range cases {
+			t.Run(tt.name, func(t *testing.T) {
+				req, err := ConvertRequest(models.ClaudeRequest{
+					Model:    "gpt-5.6-sol",
+					Messages: []models.ClaudeMessage{{Role: "user", Content: tt.content}},
+				}, cfg)
+				if err != nil {
+					t.Fatalf("ConvertRequest() error = %v", err)
+				}
+				if req.Model != "gpt-5.6-sol" {
+					t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
+				}
+				if req.RoutedEffort != tt.wantEffort || req.ReasoningEffort != tt.wantEffort {
+					t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, tt.wantEffort)
+				}
+				if req.RouteModelOverridden {
+					t.Fatalf("RouteModelOverridden = true, want false when sol model is preserved")
+				}
+				if !req.RouteEffortOverridden {
+					t.Fatalf("RouteEffortOverridden = false, want true for sol size-based effort")
+				}
+			})
+		}
+	})
+
+	t.Run("router disabled preserves incoming sol model and explicit effort", func(t *testing.T) {
+		req, err := ConvertRequest(models.ClaudeRequest{
+			Model:        "gpt-5.6-sol",
+			Messages:     []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("x", 810000)}},
+			OutputConfig: &models.ClaudeOutputConfig{Effort: "xhigh"},
+		}, &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI})
+		if err != nil {
+			t.Fatalf("ConvertRequest() error = %v", err)
+		}
+		if req.Model != "gpt-5.6-sol" {
+			t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
+		}
+		if req.ReasoningEffort != "xhigh" || req.RoutedEffort != "xhigh" {
+			t.Fatalf("effort = routed %q reasoning %q, want explicit xhigh", req.RoutedEffort, req.ReasoningEffort)
+		}
+		if req.RouteModelOverridden || req.RouteEffortOverridden {
+			t.Fatalf("route override flags = model:%v effort:%v, want both false when router is disabled", req.RouteModelOverridden, req.RouteEffortOverridden)
+		}
+	})
+}
+
+func routerTestConfig(t *testing.T, routerCfg config.RouterConfig) *config.Config {
+	t.Helper()
+	manager, err := config.NewRouterManager(filepath.Join(t.TempDir(), "router.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Save(routerCfg); err != nil {
+		t.Fatal(err)
+	}
+	return &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI, Router: manager}
+}
+
+func assertRoute(t *testing.T, req *models.OpenAIRequest, rule, model, effort string) {
+	t.Helper()
+	if req.RouteRule != rule {
+		t.Fatalf("RouteRule = %q, want %q", req.RouteRule, rule)
+	}
+	if req.Model != model {
+		t.Fatalf("Model = %q, want %q", req.Model, model)
+	}
+	if req.RoutedEffort != effort || req.ReasoningEffort != effort {
+		t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, effort)
+	}
+	if !req.RouteModelOverridden || !req.RouteEffortOverridden {
+		t.Fatalf("route override flags = model:%v effort:%v, want both true", req.RouteModelOverridden, req.RouteEffortOverridden)
+	}
 }
 
 // Benchmark tests

@@ -89,11 +89,16 @@ type OpenAIRequest struct {
 	Tools               []OpenAITool           `json:"tools,omitempty"`
 	ToolChoice          interface{}            `json:"tool_choice,omitempty"` // Force tool usage: "auto", "required", or specific tool
 	ParallelToolCalls   *bool                  `json:"parallel_tool_calls,omitempty"`
-	IncomingEffort      string                 `json:"-"`
-	RoutedEffort        string                 `json:"-"`
-	RouteRule           string                 `json:"-"`
-	RouteModelOverridden bool                  `json:"-"`
-	RouteEffortOverridden bool                 `json:"-"`
+	IncomingEffort        string `json:"-"`
+	RoutedEffort          string `json:"-"`
+	RouteRule             string `json:"-"`
+	IncomingModel         string `json:"-"`
+	RouteTextChars        int    `json:"-"`
+	HasLastToolUse        bool   `json:"-"`
+	HasLastToolResult     bool   `json:"-"`
+	RouterEnabled         bool   `json:"-"`
+	RouteModelOverridden  bool   `json:"-"`
+	RouteEffortOverridden bool   `json:"-"`
 }
 
 // OpenAITool represents a tool in OpenAI format

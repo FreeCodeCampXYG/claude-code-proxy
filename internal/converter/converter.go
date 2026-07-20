@@ -153,6 +153,7 @@ type routeFeatures struct {
 // ConvertRequest converts a Claude API request to OpenAI format
 func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models.OpenAIRequest, error) {
 	decision := routeRequest(claudeReq, cfg)
+	routeMetadata := extractRouteFeatures(claudeReq)
 	// Map model using router decision, pattern-based routing, and optional overrides.
 	openaiModel := mapModelForRequest(claudeReq, cfg, decision)
 
@@ -212,7 +213,9 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	if provider == config.ProviderNewAPI {
-		if decision.EffortOverridden {
+		if decision.Matched && shouldPreserveIncomingSolModel(openaiModel) {
+			openaiReq.ReasoningEffort = effortForSolRequest(claudeReq)
+		} else if decision.EffortOverridden {
 			openaiReq.ReasoningEffort = decision.Effort
 		} else {
 			openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
@@ -247,16 +250,52 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 		}
 	}
 
+	solModelPreserved := decision.Matched && shouldPreserveIncomingSolModel(openaiModel)
+	solEffortOverridden := provider == config.ProviderNewAPI && solModelPreserved
 	openaiReq.IncomingEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
 	openaiReq.RoutedEffort = openaiReq.IncomingEffort
-	if decision.EffortOverridden {
+	if solEffortOverridden {
+		openaiReq.RoutedEffort = openaiReq.ReasoningEffort
+	} else if decision.EffortOverridden {
 		openaiReq.RoutedEffort = decision.Effort
 	}
 	openaiReq.RouteRule = decision.Rule
-	openaiReq.RouteModelOverridden = decision.ModelOverridden
-	openaiReq.RouteEffortOverridden = decision.EffortOverridden
+	openaiReq.IncomingModel = claudeReq.Model
+	openaiReq.RouteTextChars = routeMetadata.TextLength
+	openaiReq.HasLastToolUse = routeMetadata.HasTools
+	openaiReq.HasLastToolResult = routeMetadata.HasToolResult
+	openaiReq.RouterEnabled = routerEnabled(cfg)
+	openaiReq.RouteModelOverridden = decision.ModelOverridden && !solModelPreserved
+	openaiReq.RouteEffortOverridden = decision.EffortOverridden || solEffortOverridden
 
 	return openaiReq, nil
+}
+
+func routerEnabled(cfg *config.Config) bool {
+	if cfg == nil || cfg.Router == nil {
+		return false
+	}
+	return cfg.Router.Snapshot().Enabled
+}
+
+func shouldPreserveIncomingSolModel(model string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "sol")
+}
+
+func effortForSolRequest(claudeReq models.ClaudeRequest) string {
+	textLength := len(routeText(claudeReq))
+	switch {
+	case textLength >= 800000:
+		return "max"
+	case textLength >= 300000:
+		return "xhigh"
+	case textLength >= 120000:
+		return "high"
+	case textLength >= 4000:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
@@ -268,10 +307,14 @@ func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
 }
 
 func mapModelForRequest(claudeReq models.ClaudeRequest, cfg *config.Config, decision RouteDecision) string {
+	mappedModel := mapModel(claudeReq.Model, cfg)
+	if decision.Matched && shouldPreserveIncomingSolModel(mappedModel) {
+		return mappedModel
+	}
 	if decision.ModelOverridden {
 		return decision.Model
 	}
-	return mapModel(claudeReq.Model, cfg)
+	return mappedModel
 }
 
 func routeRequest(claudeReq models.ClaudeRequest, cfg *config.Config) RouteDecision {
@@ -288,10 +331,10 @@ func routeRequest(claudeReq models.ClaudeRequest, cfg *config.Config) RouteDecis
 		rule config.RouterRule
 		ok   bool
 	}{
-		{name: "tool_result", rule: routerCfg.ToolResult, ok: features.HasToolResult},
 		{name: "long_context", rule: routerCfg.LongContext, ok: routerCfg.LongContext.MinChars > 0 && features.TextLength >= routerCfg.LongContext.MinChars},
-		{name: "tool_use", rule: routerCfg.ToolUse, ok: features.HasTools},
 		{name: "simple", rule: routerCfg.Simple, ok: !features.HasTools && !features.HasToolResult && routerCfg.Simple.MaxChars > 0 && features.TextLength <= routerCfg.Simple.MaxChars},
+		{name: "tool_result", rule: routerCfg.ToolResult, ok: features.HasToolResult},
+		{name: "tool_use", rule: routerCfg.ToolUse, ok: features.HasTools},
 	} {
 		if decision := decisionFromRule(candidate.name, candidate.rule, candidate.ok); decision.Matched {
 			return decision
@@ -324,7 +367,7 @@ func decisionFromRule(name string, rule config.RouterRule, condition bool) Route
 }
 
 func extractRouteFeatures(claudeReq models.ClaudeRequest) routeFeatures {
-	return routeFeatures{TextLength: len(routeText(claudeReq)), MessageCount: len(claudeReq.Messages), HasTools: len(claudeReq.Tools) > 0, HasToolResult: hasToolResult(claudeReq.Messages)}
+	return routeFeatures{TextLength: len(routeText(claudeReq)), MessageCount: len(claudeReq.Messages), HasTools: hasLastMessageBlockType(claudeReq.Messages, "tool_use"), HasToolResult: hasLastMessageBlockType(claudeReq.Messages, "tool_result")}
 }
 
 func routeText(claudeReq models.ClaudeRequest) string {
@@ -345,11 +388,18 @@ func messageText(content interface{}) string {
 	case []interface{}:
 		var parts []string
 		for _, block := range content {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				if blockMap["type"] == "text" {
-					if text, ok := blockMap["text"].(string); ok {
-						parts = append(parts, text)
-					}
+			blockMap, ok := block.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch blockMap["type"] {
+			case "text":
+				if text, ok := blockMap["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			case "tool_result":
+				if text := toolResultText(blockMap["content"]); text != "" {
+					parts = append(parts, text)
 				}
 			}
 		}
@@ -359,16 +409,38 @@ func messageText(content interface{}) string {
 	}
 }
 
-func hasToolResult(messages []models.ClaudeMessage) bool {
-	for _, message := range messages {
-		blocks, ok := message.Content.([]interface{})
-		if !ok {
-			continue
-		}
-		for _, block := range blocks {
-			if blockMap, ok := block.(map[string]interface{}); ok && blockMap["type"] == "tool_result" {
-				return true
+func toolResultText(content interface{}) string {
+	switch content := content.(type) {
+	case string:
+		return content
+	case []interface{}:
+		var parts []string
+		for _, block := range content {
+			blockMap, ok := block.(map[string]interface{})
+			if !ok || blockMap["type"] != "text" {
+				continue
 			}
+			if text, ok := blockMap["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func hasLastMessageBlockType(messages []models.ClaudeMessage, blockType string) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	blocks, ok := messages[len(messages)-1].Content.([]interface{})
+	if !ok {
+		return false
+	}
+	for _, block := range blocks {
+		if blockMap, ok := block.(map[string]interface{}); ok && blockMap["type"] == blockType {
+			return true
 		}
 	}
 	return false

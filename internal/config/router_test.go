@@ -10,8 +10,20 @@ import (
 
 func TestDefaultRouterConfigUsesSupportedEffortAndEmptyKeywordGroups(t *testing.T) {
 	cfg := DefaultRouterConfig()
-	if cfg.Simple.Effort != "low" {
-		t.Fatalf("simple effort = %q, want low", cfg.Simple.Effort)
+	if cfg.Defaults.Model != "gpt-5.5" || cfg.Defaults.Effort != "medium" || !cfg.Defaults.Enabled {
+		t.Fatalf("defaults = %#v, want enabled gpt-5.5 medium", cfg.Defaults)
+	}
+	if cfg.Simple.Model != "gpt-5.4" || cfg.Simple.Effort != "low" || cfg.Simple.MaxChars != 4000 {
+		t.Fatalf("simple = %#v, want gpt-5.4 low max_chars=4000", cfg.Simple)
+	}
+	if cfg.ToolUse.Model != "gpt-5.5" || cfg.ToolUse.Effort != "medium" {
+		t.Fatalf("tool_use = %#v, want gpt-5.5 medium", cfg.ToolUse)
+	}
+	if cfg.ToolResult.Model != "gpt-5.5" || cfg.ToolResult.Effort != "low" {
+		t.Fatalf("tool_result = %#v, want gpt-5.5 low", cfg.ToolResult)
+	}
+	if cfg.LongContext.Model != "gpt-5.6-terra" || cfg.LongContext.Effort != "medium" || cfg.LongContext.MinChars != 120000 {
+		t.Fatalf("long_context = %#v, want gpt-5.6-terra medium min_chars=120000", cfg.LongContext)
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {

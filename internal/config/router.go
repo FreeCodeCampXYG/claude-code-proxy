@@ -47,10 +47,11 @@ var routerGroupNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 func DefaultRouterConfig() RouterConfig {
 	return RouterConfig{
 		Enabled:       false,
-		Simple:        RouterRule{Enabled: true, MaxChars: 2000, Model: "gpt-5.6-luna", Effort: "low"},
-		ToolUse:       RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "medium"},
-		ToolResult:    RouterRule{Enabled: true, Model: "gpt-5.6-terra", Effort: "high"},
-		LongContext:   RouterRule{Enabled: true, MinChars: 20000, Model: "gpt-5.6-sol", Effort: "xhigh"},
+		Defaults:      RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+		Simple:        RouterRule{Enabled: true, MaxChars: 4000, Model: "gpt-5.4", Effort: "low"},
+		ToolUse:       RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+		ToolResult:    RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "low"},
+		LongContext:   RouterRule{Enabled: true, MinChars: 120000, Model: "gpt-5.6-terra", Effort: "medium"},
 		KeywordGroups: []RouterKeywordGroup{},
 	}
 }
