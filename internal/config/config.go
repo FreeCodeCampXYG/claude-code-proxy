@@ -94,7 +94,6 @@ type Config struct {
 	OpusModel   string
 	SonnetModel string
 	HaikuModel  string
-	EffortModels map[string]string
 
 	// GPT/NewAPI tool calling compatibility
 	DisableParallelToolCalls bool
@@ -176,10 +175,9 @@ func Load() (*Config, error) {
 		DiagnosticsBusyTimeout:      getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
 
 		// Pattern-based routing (optional overrides)
-		OpusModel:    getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),
-		SonnetModel:  getEnvOrDefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"),
-		HaikuModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", "gpt-5.6-luna"),
-		EffortModels: loadEffortModels(),
+		OpusModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),
+		SonnetModel: getEnvOrDefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"),
+		HaikuModel:  getEnvOrDefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", "gpt-5.6-luna"),
 
 		// GPT/NewAPI tool calling compatibility
 		DisableParallelToolCalls: getEnvAsBoolOrDefault("OPENAI_DISABLE_PARALLEL_TOOL_CALLS", false),
@@ -319,17 +317,6 @@ func LoadWithDebug(debug bool) (*Config, error) {
 		}
 	}
 	return cfg, nil
-}
-
-func loadEffortModels() map[string]string {
-	models := map[string]string{}
-	for _, effort := range []string{"low", "light", "medium", "high", "xhigh", "max"} {
-		value := strings.TrimSpace(os.Getenv("ANTHROPIC_EFFORT_" + strings.ToUpper(effort) + "_MODEL"))
-		if value != "" {
-			models[effort] = value
-		}
-	}
-	return models
 }
 
 func getEnvOrDefault(key, defaultValue string) string {

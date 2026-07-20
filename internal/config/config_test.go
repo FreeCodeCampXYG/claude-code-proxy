@@ -249,12 +249,9 @@ func TestModelOverrides(t *testing.T) {
 	}
 }
 
-func TestModelDefaultsAndEffortModels(t *testing.T) {
+func TestModelDefaults(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
-	t.Setenv("ANTHROPIC_EFFORT_LIGHT_MODEL", "gpt-5.6-luna-light")
-	t.Setenv("ANTHROPIC_EFFORT_LOW_MODEL", "gpt-5.6-luna-low")
-	t.Setenv("ANTHROPIC_EFFORT_MAX_MODEL", "gpt-5.6-sol-max")
 
 	cfg, err := Load()
 	if err != nil {
@@ -262,9 +259,6 @@ func TestModelDefaultsAndEffortModels(t *testing.T) {
 	}
 	if cfg.OpusModel != "gpt-5.6-sol" || cfg.SonnetModel != "gpt-5.6-terra" || cfg.HaikuModel != "gpt-5.6-luna" {
 		t.Fatalf("unexpected default models: opus=%q sonnet=%q haiku=%q", cfg.OpusModel, cfg.SonnetModel, cfg.HaikuModel)
-	}
-	if cfg.EffortModels["low"] != "gpt-5.6-luna-low" || cfg.EffortModels["light"] != "gpt-5.6-luna-light" || cfg.EffortModels["max"] != "gpt-5.6-sol-max" {
-		t.Fatalf("unexpected effort models: %#v", cfg.EffortModels)
 	}
 	if cfg.DisableParallelToolCalls {
 		t.Fatal("DisableParallelToolCalls = true, want default false so GPT tool compatibility is explicitly opt-in")
