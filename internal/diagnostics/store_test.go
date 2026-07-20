@@ -290,7 +290,7 @@ func TestStoreMigratesV1PreservingRows(t *testing.T) {
 		t.Fatalf("migrated event = %#v, %v", event, err)
 	}
 	var version int
-	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("schema version = %d, %v", version, err)
 	}
 }
@@ -299,7 +299,7 @@ func TestStoreRejectsNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "diagnostics.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil { t.Fatal(err) }
-	if _, err := db.Exec("PRAGMA user_version=7"); err != nil { t.Fatal(err) }
+	if _, err := db.Exec("PRAGMA user_version=8"); err != nil { t.Fatal(err) }
 	_ = db.Close()
 	if _, err := Open(path, StoreOptions{}); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("Open() error = %v, want newer schema rejection", err)

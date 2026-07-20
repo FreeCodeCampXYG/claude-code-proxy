@@ -42,7 +42,12 @@ CREATE TABLE diagnostics_events (
 	routed_effort TEXT NOT NULL DEFAULT '',
 	route_rule TEXT NOT NULL DEFAULT '',
 	route_model_overridden INTEGER NOT NULL DEFAULT 0,
-	route_effort_overridden INTEGER NOT NULL DEFAULT 0
+	route_effort_overridden INTEGER NOT NULL DEFAULT 0,
+	incoming_model TEXT NOT NULL DEFAULT '',
+	route_text_chars INTEGER NOT NULL DEFAULT 0,
+	has_last_tool_use INTEGER NOT NULL DEFAULT 0,
+	has_last_tool_result INTEGER NOT NULL DEFAULT 0,
+	router_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE diagnostics_content (
 	request_id TEXT NOT NULL,
