@@ -198,9 +198,17 @@ func validateRouterRule(name string, rule RouterRule) error {
 func NormalizeRouterEffort(effort string) string { return strings.ToLower(strings.TrimSpace(effort)) }
 
 func cloneRouterConfig(cfg RouterConfig) RouterConfig {
-	cfg.KeywordGroups = append([]RouterKeywordGroup(nil), cfg.KeywordGroups...)
+	if cfg.KeywordGroups == nil {
+		cfg.KeywordGroups = []RouterKeywordGroup{}
+	} else {
+		cfg.KeywordGroups = append([]RouterKeywordGroup{}, cfg.KeywordGroups...)
+	}
 	for i := range cfg.KeywordGroups {
-		cfg.KeywordGroups[i].Keywords = append([]string(nil), cfg.KeywordGroups[i].Keywords...)
+		if cfg.KeywordGroups[i].Keywords == nil {
+			cfg.KeywordGroups[i].Keywords = []string{}
+		} else {
+			cfg.KeywordGroups[i].Keywords = append([]string{}, cfg.KeywordGroups[i].Keywords...)
+		}
 	}
 	return cfg
 }
