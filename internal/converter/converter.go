@@ -213,13 +213,18 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	if provider == config.ProviderNewAPI {
-		if decision.Matched && shouldPreserveIncomingSolModel(openaiModel) {
-			openaiReq.ReasoningEffort = effortForSolRequest(claudeReq)
-		} else if decision.EffortOverridden {
-			openaiReq.ReasoningEffort = decision.Effort
-		} else {
-			openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
+		// NewAPI must only receive the caller's explicit effort. When it is absent,
+		// omit reasoning_effort and let the upstream model use its default.
+		//
+		// When the router is enabled and its matched rule specifies an effort, that
+		// value takes precedence over the caller's explicit effort so that operators
+		// can enforce a minimum reasoning intensity per rule.
+		incoming := normalizeReasoningEffort(claudeReq, claudeReq.Model)
+		routed := incoming
+		if decision.Matched && decision.EffortOverridden && isHigherOrEqual(decision.Effort, incoming) {
+			routed = decision.Effort
 		}
+		openaiReq.ReasoningEffort = routed
 	}
 
 	// Set token limit using adaptive per-model detection
@@ -251,14 +256,8 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	solModelPreserved := decision.Matched && shouldPreserveIncomingSolModel(openaiModel)
-	solEffortOverridden := provider == config.ProviderNewAPI && solModelPreserved
 	openaiReq.IncomingEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
-	openaiReq.RoutedEffort = openaiReq.IncomingEffort
-	if solEffortOverridden {
-		openaiReq.RoutedEffort = openaiReq.ReasoningEffort
-	} else if decision.EffortOverridden {
-		openaiReq.RoutedEffort = decision.Effort
-	}
+	openaiReq.RoutedEffort = openaiReq.ReasoningEffort
 	openaiReq.RouteRule = decision.Rule
 	openaiReq.IncomingModel = claudeReq.Model
 	openaiReq.RouteTextChars = routeMetadata.TextLength
@@ -266,7 +265,7 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	openaiReq.HasLastToolResult = routeMetadata.HasToolResult
 	openaiReq.RouterEnabled = routerEnabled(cfg)
 	openaiReq.RouteModelOverridden = decision.ModelOverridden && !solModelPreserved
-	openaiReq.RouteEffortOverridden = decision.EffortOverridden || solEffortOverridden
+	openaiReq.RouteEffortOverridden = decision.EffortOverridden && isHigherOrEqual(decision.Effort, openaiReq.IncomingEffort)
 
 	return openaiReq, nil
 }
@@ -282,28 +281,33 @@ func shouldPreserveIncomingSolModel(model string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "sol")
 }
 
-func effortForSolRequest(claudeReq models.ClaudeRequest) string {
-	textLength := len(routeText(claudeReq))
-	switch {
-	case textLength >= 800000:
-		return "max"
-	case textLength >= 300000:
-		return "xhigh"
-	case textLength >= 120000:
-		return "high"
-	case textLength >= 4000:
-		return "medium"
-	default:
-		return "low"
-	}
-}
-
 func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
 	if claudeReq.OutputConfig == nil {
 		return ""
 	}
 
 	return strings.ToLower(strings.TrimSpace(claudeReq.OutputConfig.Effort))
+}
+
+// effortRank maps reasoning_effort levels to numeric ranks for comparison.
+// "" (unset) is rank 0 so any explicit router effort wins over absent caller value.
+var effortRank = map[string]int{
+	"":        0,
+	"minimal": 1,
+	"low":     2,
+	"medium":  3,
+	"high":    4,
+	"xhigh":   5,
+	"max":     6,
+}
+
+// isHigherOrEqual returns true when the router effort is at least as intense as
+// the incoming caller effort. An empty incoming value always loses to a non-empty
+// router value, matching the "enforce minimum" design intent.
+func isHigherOrEqual(routerEffort, incomingEffort string) bool {
+	rankR := effortRank[strings.ToLower(strings.TrimSpace(routerEffort))]
+	rankI := effortRank[strings.ToLower(strings.TrimSpace(incomingEffort))]
+	return rankR >= rankI
 }
 
 func mapModelForRequest(claudeReq models.ClaudeRequest, cfg *config.Config, decision RouteDecision) string {

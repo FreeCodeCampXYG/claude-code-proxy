@@ -38,6 +38,7 @@ func Start(cfg *config.Config) error {
 			ContentRetention: cfg.DiagnosticsContentRetention,
 			CaptureContent:   cfg.DiagnosticsCaptureContent,
 			BusyTimeout:      cfg.DiagnosticsBusyTimeout,
+			CloseTimeout:     cfg.DiagnosticsCloseTimeout,
 		})
 		if err != nil {
 			return fmt.Errorf("initialize diagnostics store: %w", err)

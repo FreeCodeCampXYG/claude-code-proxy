@@ -33,6 +33,7 @@ const (
 	DefaultDiagnosticsRetention        = 72 * time.Hour
 	DefaultDiagnosticsContentRetention = time.Hour
 	DefaultDiagnosticsBusyTimeout      = 5 * time.Second
+	DefaultDiagnosticsCloseTimeout     = 10 * time.Second
 	DefaultContextWindowRewriteStatus  = 413
 	DefaultContextWindowPatternsMode   = "append"
 )
@@ -89,6 +90,7 @@ type Config struct {
 	DiagnosticsRetention        time.Duration
 	DiagnosticsContentRetention time.Duration
 	DiagnosticsBusyTimeout      time.Duration
+	DiagnosticsCloseTimeout     time.Duration
 
 	// Model routing (pattern-based if not set)
 	OpusModel   string
@@ -173,6 +175,7 @@ func Load() (*Config, error) {
 		DiagnosticsRetention:        getEnvAsDurationOrDefault("DIAGNOSTICS_RETENTION", DefaultDiagnosticsRetention),
 		DiagnosticsContentRetention: getEnvAsDurationOrDefault("DIAGNOSTICS_CONTENT_RETENTION", DefaultDiagnosticsContentRetention),
 		DiagnosticsBusyTimeout:      getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
+		DiagnosticsCloseTimeout:     getEnvAsDurationOrDefault("DIAGNOSTICS_CLOSE_TIMEOUT", DefaultDiagnosticsCloseTimeout),
 
 		// Pattern-based routing (optional overrides)
 		OpusModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),

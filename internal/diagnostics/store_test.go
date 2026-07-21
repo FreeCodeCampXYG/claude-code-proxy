@@ -527,3 +527,84 @@ func openTestStore(t *testing.T, options StoreOptions) *Store {
 	})
 	return store
 }
+
+func TestStoreStats(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	stats := store.StoreStats()
+	if stats == nil {
+		t.Fatal("StoreStats() = nil, want non-nil")
+	}
+	if depth, _ := stats["queue_depth"].(int); depth != 0 {
+		t.Fatalf("queue_depth = %d, want 0", depth)
+	}
+	if capVal, _ := stats["queue_capacity"].(int); capVal != 256 {
+		t.Fatalf("queue_capacity = %d, want 256", capVal)
+	}
+	if dropped, _ := stats["dropped_total"].(uint64); dropped != 0 {
+		t.Fatalf("dropped_total = %d, want 0", dropped)
+	}
+	if closing, _ := stats["closing"].(bool); closing {
+		t.Fatal("closing = true, want false")
+	}
+
+	// Reserve some capture bytes to verify capture_bytes is reflected
+	if !store.ReserveCapture(42) {
+		t.Fatal("ReserveCapture() = false")
+	}
+	stats = store.StoreStats()
+	if capBytes, _ := stats["capture_bytes"].(int64); capBytes != 42 {
+		t.Fatalf("capture_bytes after reserve = %d, want 42", capBytes)
+	}
+
+	// Enqueue a job to increase queue_depth
+	store.Enqueue(Event{RequestID: "stats-test"}, []ContentCapture{})
+	stats = store.StoreStats()
+	if depth, _ := stats["queue_depth"].(int); depth != 1 {
+		t.Fatalf("queue_depth after enqueue = %d, want 1", depth)
+	}
+
+	// Nil store should return nil
+	var nilStore *Store
+	if nilStore.StoreStats() != nil {
+		t.Fatal("StoreStats() on nil store != nil")
+	}
+}
+
+func TestStoreCloseWithTimeout(t *testing.T) {
+	// Use an extremely short timeout to test forced-abandon path.
+	store, err := Open(filepath.Join(t.TempDir(), "diagnostics.db"), StoreOptions{
+		CloseTimeout: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enqueue enough jobs that the single-threaded worker cannot drain them in 1ms.
+	for i := 0; i < 50; i++ {
+		store.Enqueue(Event{RequestID: fmt.Sprintf("timeout-%d", i)}, []ContentCapture{
+			{
+				RequestID:   fmt.Sprintf("timeout-%d", i),
+				Boundary:    ContentBoundaryClaudeRequest,
+				Body:        []byte(`{"payload":"` + strings.Repeat("x", 100*1024) + `"}`),
+				SourceBytes: 100 * 1024,
+			},
+		})
+	}
+	start := time.Now()
+	err = store.Close()
+	elapsed := time.Since(start)
+	// Close must not block indefinitely; 1ms timeout means we should return quickly.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Close() took %v, expected < 5s with 1ms closeTimeout", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// After close, stats should report closing=true.
+	stats := store.StoreStats()
+	if stats == nil {
+		t.Fatal("StoreStats() after Close = nil")
+	}
+	if closing, _ := stats["closing"].(bool); !closing {
+		t.Fatal("closing after Close = false, want true")
+	}
+}

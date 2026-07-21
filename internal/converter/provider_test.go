@@ -2,6 +2,7 @@ package converter
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
@@ -225,6 +226,54 @@ func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestNewAPIRouterEffortEnforcesMinimum(t *testing.T) {
+	cfg := routerProviderTestConfig(t, config.RouterConfig{
+		Enabled:  true,
+		Defaults: config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
+		Simple:   config.RouterRule{Enabled: true, Model: "gpt-5.4", Effort: "low", MaxChars: 4000},
+	})
+
+	tests := []struct {
+		name               string
+		incoming           string
+		wantRouted         string
+		wantOverridden     bool
+	}{
+		// Router defaults effort=medium; absent incoming gets overridden to medium
+		{name: "absent effort uses router default", wantRouted: "medium", wantOverridden: true},
+		// Incoming low < router medium → router wins (minimum enforcement)
+		{name: "lower than router default loses", incoming: "low", wantRouted: "medium", wantOverridden: true},
+		// Incoming equals router default → still counts as overridden
+		{name: "same as router default", incoming: "medium", wantRouted: "medium", wantOverridden: true},
+		// Incoming high > router medium → caller wins (no lowering)
+		{name: "higher than router default wins", incoming: "high", wantRouted: "high", wantOverridden: false},
+		// Normalized casing
+		{name: "casing normalized", incoming: "  XHigh  ", wantRouted: "xhigh", wantOverridden: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var outputConfig *models.ClaudeOutputConfig
+			if tt.incoming != "" {
+				outputConfig = &models.ClaudeOutputConfig{Effort: tt.incoming}
+			}
+			req, err := ConvertRequest(models.ClaudeRequest{
+				Model:        "claude-sonnet-4",
+				Messages:     []models.ClaudeMessage{{Role: "user", Content: "test"}},
+				OutputConfig: outputConfig,
+			}, cfg)
+			if err != nil {
+				t.Fatalf("ConvertRequest() error = %v", err)
+			}
+			if req.ReasoningEffort != tt.wantRouted || req.RoutedEffort != tt.wantRouted {
+				t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, tt.wantRouted)
+			}
+			if req.RouteEffortOverridden != tt.wantOverridden {
+				t.Fatalf("RouteEffortOverridden = %v, want %v", req.RouteEffortOverridden, tt.wantOverridden)
+			}
+		})
+	}
+}
 func TestEffortDoesNotRouteModel(t *testing.T) {
 	req, err := ConvertRequest(models.ClaudeRequest{
 		Model:        "claude-sonnet-4",
@@ -242,7 +291,18 @@ func TestEffortDoesNotRouteModel(t *testing.T) {
 	}
 }
 
-// TestModelMappingVerification tests that we're using the correct model for each provider
+func routerProviderTestConfig(t *testing.T, routerCfg config.RouterConfig) *config.Config {
+	t.Helper()
+	manager, err := config.NewRouterManager(filepath.Join(t.TempDir(), "router.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Save(routerCfg); err != nil {
+		t.Fatal(err)
+	}
+	return &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI, Router: manager}
+}
+
 func TestModelMappingVerification(t *testing.T) {
 	tests := []struct {
 		name        string

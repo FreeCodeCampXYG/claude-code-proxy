@@ -476,6 +476,7 @@ func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store, cfg *co
 	group := app.Group("/debug/logs", requireLoopback, diagnosticsSecurity(token))
 	group.Get("", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, token) })
 	group.Get("/", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, token) })
+	group.Get("/status", func(c *fiber.Ctx) error { return diagnosticsStoreStatus(c, store) })
 	group.Get("/events", func(c *fiber.Ctx) error { return diagnosticsList(c, store) })
 	group.Get("/analytics", func(c *fiber.Ctx) error { return diagnosticsAnalytics(c, store) })
 	group.Get("/router-config", func(c *fiber.Ctx) error { return diagnosticsRouterConfig(c, cfg) })
@@ -521,6 +522,14 @@ func requireLoopback(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "debug logs are available only from loopback"})
 	}
 	return c.Next()
+}
+
+func diagnosticsStoreStatus(c *fiber.Ctx, store *diagnostics.Store) error {
+	stats := store.StoreStats()
+	if stats == nil {
+		return c.JSON(fiber.Map{"status": "unavailable"})
+	}
+	return c.JSON(stats)
 }
 
 func diagnosticsQuery(c *fiber.Ctx, defaultLimit int) (diagnostics.Query, error) {

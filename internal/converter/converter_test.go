@@ -798,7 +798,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 			Model: "claude-sonnet-4",
 			Messages: []models.ClaudeMessage{
 				{Role: "user", Content: "read a file"},
-				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}},
+				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}}},
 				{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "file content"}}},
 				{Role: "assistant", Content: "done"},
 				{Role: "user", Content: "2+2?"},
@@ -807,7 +807,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
-		assertRoute(t, req, "simple", "gpt-5.4", "low")
+		assertRoute(t, req, "simple", "gpt-5.4")
 	})
 
 	t.Run("immediate tool_result routes to tool_result", func(t *testing.T) {
@@ -818,7 +818,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
-		assertRoute(t, req, "tool_result", "gpt-5.5", "low")
+		assertRoute(t, req, "tool_result", "gpt-5.5")
 	})
 
 	t.Run("available tool schemas alone do not route to tool_use", func(t *testing.T) {
@@ -834,7 +834,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
-		assertRoute(t, req, "simple", "gpt-5.4", "low")
+		assertRoute(t, req, "simple", "gpt-5.4")
 	})
 
 	t.Run("long context beats simple and tool_result", func(t *testing.T) {
@@ -857,7 +857,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
-		assertRoute(t, req, "long_context", "gpt-5.6-terra", "medium")
+		assertRoute(t, req, "long_context", "gpt-5.6-terra")
 	})
 
 	t.Run("default fallback uses main workhorse", func(t *testing.T) {
@@ -868,20 +868,19 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
 		}
-		assertRoute(t, req, "default", "gpt-5.5", "medium")
+		assertRoute(t, req, "default", "gpt-5.5")
 	})
 
-	t.Run("incoming sol model is preserved while effort follows content size", func(t *testing.T) {
+	t.Run("incoming sol model is preserved without inferred effort", func(t *testing.T) {
 		cases := []struct {
-			name       string
-			content    string
-			wantEffort string
+			name    string
+			content string
 		}{
-			{name: "small", content: "hello", wantEffort: "low"},
-			{name: "medium", content: strings.Repeat("x", 5000), wantEffort: "medium"},
-			{name: "high", content: strings.Repeat("x", 130000), wantEffort: "high"},
-			{name: "xhigh", content: strings.Repeat("x", 310000), wantEffort: "xhigh"},
-			{name: "max", content: strings.Repeat("x", 810000), wantEffort: "max"},
+			{name: "small", content: "hello"},
+			{name: "medium", content: strings.Repeat("x", 5000)},
+			{name: "high", content: strings.Repeat("x", 130000)},
+			{name: "xhigh", content: strings.Repeat("x", 310000)},
+			{name: "max", content: strings.Repeat("x", 810000)},
 		}
 		for _, tt := range cases {
 			t.Run(tt.name, func(t *testing.T) {
@@ -895,14 +894,38 @@ func TestRouterCostAwareRouting(t *testing.T) {
 				if req.Model != "gpt-5.6-sol" {
 					t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
 				}
-				if req.RoutedEffort != tt.wantEffort || req.ReasoningEffort != tt.wantEffort {
-					t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, tt.wantEffort)
+				if req.RoutedEffort != "" || req.ReasoningEffort != "" {
+					t.Fatalf("effort = routed %q reasoning %q, want omitted", req.RoutedEffort, req.ReasoningEffort)
 				}
 				if req.RouteModelOverridden {
 					t.Fatalf("RouteModelOverridden = true, want false when sol model is preserved")
 				}
-				if !req.RouteEffortOverridden {
-					t.Fatalf("RouteEffortOverridden = false, want true for sol size-based effort")
+				if req.RouteEffortOverridden {
+					t.Fatalf("RouteEffortOverridden = true, want false for transparent NewAPI effort")
+				}
+			})
+		}
+	})
+
+	t.Run("incoming sol explicit effort is preserved for huge requests", func(t *testing.T) {
+		for _, effort := range []string{"high", "max"} {
+			t.Run(effort, func(t *testing.T) {
+				req, err := ConvertRequest(models.ClaudeRequest{
+					Model:        "gpt-5.6-sol",
+					Messages:     []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("x", 810000)}},
+					OutputConfig: &models.ClaudeOutputConfig{Effort: effort},
+				}, cfg)
+				if err != nil {
+					t.Fatalf("ConvertRequest() error = %v", err)
+				}
+				if req.Model != "gpt-5.6-sol" {
+					t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
+				}
+				if req.ReasoningEffort != effort || req.RoutedEffort != effort {
+					t.Fatalf("effort = routed %q reasoning %q, want explicit %q", req.RoutedEffort, req.ReasoningEffort, effort)
+				}
+				if req.RouteEffortOverridden {
+					t.Fatalf("RouteEffortOverridden = true, want false for explicit transparent effort")
 				}
 			})
 		}
@@ -941,19 +964,15 @@ func routerTestConfig(t *testing.T, routerCfg config.RouterConfig) *config.Confi
 	return &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI, Router: manager}
 }
 
-func assertRoute(t *testing.T, req *models.OpenAIRequest, rule, model, effort string) {
+// assertRoute verifies that the request was routed to the expected rule and model.
+// Router rules now enforce minimum effort; effort assertions are done in dedicated tests.
+func assertRoute(t *testing.T, req *models.OpenAIRequest, rule, model string) {
 	t.Helper()
 	if req.RouteRule != rule {
 		t.Fatalf("RouteRule = %q, want %q", req.RouteRule, rule)
 	}
 	if req.Model != model {
 		t.Fatalf("Model = %q, want %q", req.Model, model)
-	}
-	if req.RoutedEffort != effort || req.ReasoningEffort != effort {
-		t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, effort)
-	}
-	if !req.RouteModelOverridden || !req.RouteEffortOverridden {
-		t.Fatalf("route override flags = model:%v effort:%v, want both true", req.RouteModelOverridden, req.RouteEffortOverridden)
 	}
 }
 

@@ -33,6 +33,7 @@ type StoreOptions struct {
 	ContentRetention time.Duration
 	CaptureContent   bool
 	BusyTimeout      time.Duration
+	CloseTimeout     time.Duration // maximum duration to wait for the worker to drain on Close; zero means no forced shutdown
 	Now              func() time.Time
 }
 
@@ -48,6 +49,9 @@ type Store struct {
 	dropped          atomic.Uint64
 	captureBytes     atomic.Int64
 	captureByteLimit int64
+	operationTimeout time.Duration
+	closeTimeout     time.Duration
+	dbMu             sync.Mutex
 	lifecycleMu      sync.Mutex
 	closing          bool
 }
@@ -350,6 +354,8 @@ func Open(path string, options StoreOptions) (*Store, error) {
 		captureContent:   options.CaptureContent,
 		now:              options.Now,
 		captureByteLimit: DefaultCaptureInFlightBytes,
+		operationTimeout: diagnosticsOperationTimeout(busyTimeout),
+		closeTimeout:     options.CloseTimeout,
 	}
 	if store.retention <= 0 {
 		store.retention = DefaultRetention
@@ -368,7 +374,10 @@ func Open(path string, options StoreOptions) (*Store, error) {
 		return nil, err
 	}
 	if !store.captureContent {
-		if _, err := store.db.ExecContext(context.Background(), "DELETE FROM diagnostics_content"); err != nil {
+		store.dbMu.Lock()
+		_, err := store.db.ExecContext(context.Background(), "DELETE FROM diagnostics_content")
+		store.dbMu.Unlock()
+		if err != nil {
 			db.Close()
 			return nil, fmt.Errorf("purge disabled diagnostics content: %w", err)
 		}
@@ -377,6 +386,35 @@ func Open(path string, options StoreOptions) (*Store, error) {
 	return store, nil
 }
 
+func diagnosticsOperationTimeout(busyTimeout time.Duration) time.Duration {
+	operationTimeout := busyTimeout + time.Second
+	if operationTimeout < 5*time.Second {
+		return 5 * time.Second
+	}
+	return operationTimeout
+}
+
+func (store *Store) newOperationContext() (context.Context, context.CancelFunc) {
+	timeout := store.operationTimeout
+	if timeout <= 0 {
+		timeout = diagnosticsOperationTimeout(5 * time.Second)
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func rollbackTransaction(tx *sql.Tx, label string, cause error) error {
+	if tx == nil {
+		return cause
+	}
+	rollbackErr := tx.Rollback()
+	if rollbackErr == nil || errors.Is(rollbackErr, sql.ErrTxDone) {
+		return cause
+	}
+	if cause == nil {
+		return fmt.Errorf("rollback %s: %w", label, rollbackErr)
+	}
+	return fmt.Errorf("%w; rollback %s: %v", cause, label, rollbackErr)
+}
 func (store *Store) initialize(ctx context.Context, busyTimeout time.Duration, enableWAL bool) error {
 	if err := store.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping diagnostics database: %w", err)
@@ -468,15 +506,23 @@ func (store *Store) migrate(ctx context.Context, statements []string, label stri
 	if err != nil {
 		return fmt.Errorf("begin diagnostics schema migration %s: %w", label, err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				fmt.Printf("[WARN] Diagnostics schema migration %s rollback failed: %v\n", label, rollbackErr)
+			}
+		}
+	}()
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("migrate diagnostics schema %s: %w", label, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit diagnostics schema migration %s: %w", label, err)
 	}
+	committed = true
 	return nil
 }
 
@@ -601,15 +647,58 @@ func (store *Store) Close() error {
 	}
 	store.lifecycleMu.Unlock()
 
-	store.worker.Wait()
+	// Wait for the worker to drain pending jobs.  When a closeTimeout is set,
+	// we force-abandon remaining jobs after that duration instead of blocking
+	// indefinitely.  This prevents the proxy process from hanging on shutdown
+	// when many concurrent requests have backlogged diagnostics writes.
+	if store.closeTimeout > 0 {
+		done := make(chan struct{})
+		go func() { store.worker.Wait(); close(done) }()
+		select {
+		case <-done:
+			// Worker finished normally within the deadline.
+		case <-time.After(store.closeTimeout):
+			remaining := len(store.jobs)
+			store.dropped.Add(uint64(remaining))
+			fmt.Printf("[WARN] Diagnostics Close timed out after %v; %d jobs abandoned, total dropped=%d\n",
+				store.closeTimeout, remaining, store.dropped.Load())
+			// The worker goroutine will exit on its own once it drains what it can.
+		}
+	} else {
+		store.worker.Wait()
+	}
+
 	store.lifecycleMu.Lock()
 	store.jobs, store.stop = nil, nil
 	store.lifecycleMu.Unlock()
 	return store.db.Close()
 }
 
+// Stats returns a snapshot of the store's internal state for observability.
+// It is safe to call from any goroutine (including HTTP handlers).
+func (store *Store) StoreStats() map[string]interface{} {
+	if store == nil || store.db == nil {
+		return nil
+	}
+	store.lifecycleMu.Lock()
+	defer store.lifecycleMu.Unlock()
+
+	queueLen := 0
+	if store.jobs != nil {
+		queueLen = len(store.jobs)
+	}
+	return map[string]interface{}{
+		"queue_depth":    queueLen, // number of persistJobs waiting in channel
+		"queue_capacity": cap(store.jobs),
+		"dropped_total":  store.dropped.Load(),
+		"capture_bytes":  store.captureBytes.Load(),
+		"closing":        store.closing,
+		"worker_active":  store.worker.Counter() > 0,
+	}
+}
+
 func (store *Store) startWriter() {
-	store.jobs = make(chan persistJob, 64)
+	store.jobs = make(chan persistJob, 256)
 	store.stop = make(chan struct{})
 	store.worker.Add(1)
 	go func() {
@@ -637,7 +726,7 @@ func (store *Store) startWriter() {
 }
 
 func (store *Store) persistJob(job persistJob) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := store.newOperationContext()
 	defer cancel()
 	defer store.releaseCaptures(job.captures)
 
@@ -646,16 +735,17 @@ func (store *Store) persistJob(job persistJob) {
 		store.dropped.Add(1)
 		fmt.Printf("[WARN] Diagnostics bundle persistence failed; dropped request_id=%s: %v\n", job.event.RequestID, err)
 	}
-	store.cleanupExpiredContentContext(ctx)
 }
 
 func (store *Store) cleanupExpiredContent() {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := store.newOperationContext()
 	defer cancel()
 	store.cleanupExpiredContentContext(ctx)
 }
 
 func (store *Store) cleanupExpiredContentContext(ctx context.Context) {
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
 		store.dropped.Add(1)
 		fmt.Printf("[WARN] Diagnostics content cleanup failed: %v\n", err)
@@ -906,11 +996,13 @@ func (store *Store) Insert(ctx context.Context, event Event) error {
 	if err != nil {
 		return err
 	}
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	return store.insertEvent(ctx, store.db, event)
 }
 
-func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []ContentSnapshot) error {
-	event, err := store.normalizeEvent(event)
+func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []ContentSnapshot) (err error) {
+	event, err = store.normalizeEvent(event)
 	if err != nil {
 		return err
 	}
@@ -925,6 +1017,10 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 		}
 		normalized = append(normalized, snapshot)
 	}
+
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
+
 	if len(normalized) == 0 {
 		return store.upsertEvent(ctx, store.db, event)
 	}
@@ -935,7 +1031,9 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 	committed := false
 	defer func() {
 		if !committed {
-			_ = tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback diagnostics persistence transaction: %v", err, rollbackErr)
+			}
 		}
 	}()
 	if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
@@ -964,6 +1062,8 @@ func (store *Store) InsertContent(ctx context.Context, snapshot ContentSnapshot)
 	if err != nil {
 		return err
 	}
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	return store.insertContent(ctx, store.db, snapshot)
 }
 
@@ -989,6 +1089,8 @@ func (store *Store) Content(ctx context.Context, query ContentQuery) ([]ContentS
 		args = append(args, query.Boundary)
 	}
 	statement += " ORDER BY attempt_number ASC, boundary ASC"
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	rows, err := store.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query diagnostics content: %w", err)
@@ -1103,6 +1205,8 @@ const summaryColumns = `request_id, created_at, updated_at, method, path, provid
 		incoming_model, route_text_chars, has_last_tool_use, has_last_tool_result, router_enabled`
 
 func (store *Store) Detail(ctx context.Context, requestID string) (Event, error) {
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	return scanEvent(store.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM diagnostics_events WHERE request_id = ?", requestID))
 }
 
@@ -1114,6 +1218,8 @@ func (store *Store) Query(ctx context.Context, query Query) ([]EventSummary, err
 	}
 	statement := "SELECT " + summaryColumns + " FROM diagnostics_events" + where + " ORDER BY created_at " + order + ", request_id " + order
 	statement, args = addLimit(statement, args, query)
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	rows, err := store.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query diagnostics events: %w", err)
@@ -1136,6 +1242,8 @@ func (store *Store) Query(ctx context.Context, query Query) ([]EventSummary, err
 func (store *Store) Count(ctx context.Context, query Query) (int, error) {
 	where, args := buildWhere(query)
 	var total int
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM diagnostics_events"+where, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("count diagnostics events: %w", err)
 	}
@@ -1153,6 +1261,8 @@ func (store *Store) Export(ctx context.Context, query Query, yield func(Event) e
 	}
 	statement := "SELECT " + eventColumns + " FROM diagnostics_events" + where + " ORDER BY created_at " + order + ", request_id " + order
 	statement, args = addLimit(statement, args, query)
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	rows, err := store.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return fmt.Errorf("export diagnostics events: %w", err)
@@ -1357,6 +1467,8 @@ func normalizedBounds(query Query) (time.Time, time.Time) {
 }
 
 func (store *Store) Delete(ctx context.Context, requestID string) (bool, error) {
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	result, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_events WHERE request_id = ?", requestID)
 	if err != nil { return false, fmt.Errorf("delete diagnostics event %q: %w", requestID, err) }
 	count, err := result.RowsAffected()
@@ -1365,6 +1477,8 @@ func (store *Store) Delete(ctx context.Context, requestID string) (bool, error) 
 }
 
 func (store *Store) Clear(ctx context.Context) (int64, error) {
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	result, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_events")
 	if err != nil { return 0, fmt.Errorf("clear diagnostics events: %w", err) }
 	count, err := result.RowsAffected()
@@ -1377,6 +1491,8 @@ func (store *Store) Cleanup(ctx context.Context) (int64, error) {
 }
 
 func (store *Store) CleanupBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	store.dbMu.Lock()
+	defer store.dbMu.Unlock()
 	if _, err := store.db.ExecContext(ctx, "DELETE FROM diagnostics_content WHERE expires_at <= ?", toMillis(store.now().UTC())); err != nil {
 		return 0, fmt.Errorf("clean up diagnostics content: %w", err)
 	}
