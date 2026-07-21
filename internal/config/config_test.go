@@ -743,8 +743,67 @@ func TestMultipleEnvFiles(t *testing.T) {
 	if cfg.OpenAIAPIKey != "local-key" {
 		t.Errorf("Expected local API key, got %q", cfg.OpenAIAPIKey)
 	}
-
 	if cfg.OpenAIBaseURL != "https://local.example.com" {
 		t.Errorf("Expected local base URL, got %q", cfg.OpenAIBaseURL)
+	}
+}
+
+func TestLoadReportsMalformedDotenv(t *testing.T) {
+	tempDir := t.TempDir()
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHome := os.Getenv("HOME")
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tempDir)
+	t.Cleanup(func() {
+		_ = os.Chdir(originalCwd)
+		_ = os.Setenv("HOME", originalHome)
+	})
+	if err := os.WriteFile(filepath.Join(tempDir, ".env"), []byte("OPENAI_API_KEY=broken\nROUTER_CONFIG_PATH=\"unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load()
+	if err == nil || !strings.Contains(err.Error(), "load config from .env") {
+		t.Fatalf("Load() error = %v, want contextual .env parse error", err)
+	}
+}
+
+func TestLoadAllowsMissingNestedRouterConfigPath(t *testing.T) {
+	tempDir := t.TempDir()
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHome := os.Getenv("HOME")
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tempDir)
+	t.Cleanup(func() {
+		_ = os.Chdir(originalCwd)
+		_ = os.Setenv("HOME", originalHome)
+	})
+
+	routerPath := filepath.Join(tempDir, "data", "ClaudeWork", "proxy-router.json")
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_API_KEYS", "")
+	t.Setenv("OPENAI_API_KEY_INDEX", "")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("ROUTER_CONFIG_PATH", routerPath)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RouterConfigPath != routerPath || cfg.Router.Path() != routerPath {
+		t.Fatalf("router path = config %q manager %q, want %q", cfg.RouterConfigPath, cfg.Router.Path(), routerPath)
+	}
+	if _, err := os.Stat(routerPath); !os.IsNotExist(err) {
+		t.Fatalf("router file should remain absent until save, stat error = %v", err)
 	}
 }

@@ -212,11 +212,12 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 		}
 	}
 
+	incomingEffort := normalizeReasoningEffort(claudeReq, claudeReq.Model)
+	effectiveEffort := resolveReasoningEffort(incomingEffort, decision)
 	if provider == config.ProviderNewAPI {
-		// NewAPI must only receive the caller's explicit effort. When it is absent,
-		// omit reasoning_effort and let the upstream model use its default. Do not
-		// synthesize or normalize unknown future values from router rules here.
-		openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
+		// A matched router effort is an explicit operator policy. Otherwise NewAPI
+		// receives only the caller's normalized effort and omits empty values.
+		openaiReq.ReasoningEffort = effectiveEffort
 	}
 
 	// Set token limit using adaptive per-model detection
@@ -248,8 +249,8 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	}
 
 	solModelPreserved := decision.Matched && shouldPreserveIncomingSolModel(claudeReq.Model)
-	openaiReq.IncomingEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
-	openaiReq.RoutedEffort = routedEffortMetadata(openaiReq.IncomingEffort, decision, solModelPreserved)
+	openaiReq.IncomingEffort = incomingEffort
+	openaiReq.RoutedEffort = effectiveEffort
 	openaiReq.RouteRule = decision.Rule
 	openaiReq.IncomingModel = claudeReq.Model
 	openaiReq.RouteTextChars = routeMetadata.TextLength
@@ -257,7 +258,7 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	openaiReq.HasLastToolResult = routeMetadata.HasToolResult
 	openaiReq.RouterEnabled = routerEnabled(cfg)
 	openaiReq.RouteModelOverridden = decision.ModelOverridden && !solModelPreserved
-	openaiReq.RouteEffortOverridden = provider != config.ProviderNewAPI && !solModelPreserved && decision.EffortOverridden && shouldApplyRouterEffort(decision.Effort, openaiReq.IncomingEffort)
+	openaiReq.RouteEffortOverridden = decision.EffortOverridden && effectiveEffort != incomingEffort
 
 	return openaiReq, nil
 }
@@ -274,11 +275,11 @@ func shouldPreserveIncomingSolModel(model string) bool {
 	return !strings.Contains(model, "claude") && strings.Contains(model, "sol")
 }
 
-func routedEffortMetadata(incoming string, decision RouteDecision, preserveIncomingModel bool) string {
-	if preserveIncomingModel || !decision.EffortOverridden || !shouldApplyRouterEffort(decision.Effort, incoming) {
-		return incoming
+func resolveReasoningEffort(incoming string, decision RouteDecision) string {
+	if decision.Matched && decision.EffortOverridden {
+		return decision.Effort
 	}
-	return decision.Effort
+	return incoming
 }
 
 func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
@@ -286,36 +287,7 @@ func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
 		return ""
 	}
 
-	return strings.ToLower(strings.TrimSpace(claudeReq.OutputConfig.Effort))
-}
-
-// effortRank maps reasoning_effort levels to numeric ranks for comparison.
-// "" (unset) is rank 0 so any explicit router effort wins over absent caller value.
-var effortRank = map[string]int{
-	"":        0,
-	"minimal": 1,
-	"low":     2,
-	"medium":  3,
-	"high":    4,
-	"xhigh":   5,
-	"max":     6,
-}
-
-// shouldApplyRouterEffort returns true only when a router rule can safely act as
-// a minimum for known effort values. Unknown explicit caller values are preserved
-// so future NewAPI efforts such as "automatic" are not silently downgraded.
-func shouldApplyRouterEffort(routerEffort, incomingEffort string) bool {
-	routerEffort = strings.ToLower(strings.TrimSpace(routerEffort))
-	incomingEffort = strings.ToLower(strings.TrimSpace(incomingEffort))
-	rankR, okR := effortRank[routerEffort]
-	if !okR || routerEffort == "" {
-		return false
-	}
-	if incomingEffort == "" {
-		return true
-	}
-	rankI, okI := effortRank[incomingEffort]
-	return okI && rankR >= rankI
+	return config.NormalizeRouterEffort(claudeReq.OutputConfig.Effort)
 }
 
 func mapModelForRequest(claudeReq models.ClaudeRequest, cfg *config.Config, decision RouteDecision) string {

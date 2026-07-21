@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -69,6 +70,9 @@ func NewRouterManager(path string) (*RouterManager, error) {
 	}
 	cfg := DefaultRouterConfig()
 	if data, err := os.ReadFile(path); err == nil {
+		if bytes.HasPrefix(data, []byte("SQLite format 3\x00")) {
+			return nil, fmt.Errorf("router config %s is a SQLite database, not a JSON router config; choose a separate .json path for ROUTER_CONFIG_PATH", path)
+		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse router config %s: %w", path, err)
 		}
@@ -196,7 +200,13 @@ func validateRouterRule(name string, rule RouterRule) error {
 	return nil
 }
 
-func NormalizeRouterEffort(effort string) string { return strings.ToLower(strings.TrimSpace(effort)) }
+func NormalizeRouterEffort(effort string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "undefined" || effort == "null" {
+		return ""
+	}
+	return effort
+}
 
 func cloneRouterConfig(cfg RouterConfig) RouterConfig {
 	if cfg.KeywordGroups == nil {

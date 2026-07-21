@@ -61,3 +61,46 @@ func TestRouterManagerNormalizesLoadedAndSavedConfig(t *testing.T) {
 		t.Fatalf("saved config should encode empty keyword_groups array, got %s", data)
 	}
 }
+
+func TestRouterManagerSaveCreatesMissingParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data", "ClaudeWork", "proxy-router.json")
+	manager, err := NewRouterManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Save(DefaultRouterConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("saved router config stat error = %v", err)
+	}
+}
+
+
+func TestNormalizeRouterEffortTreatsMissingUIValuesAsEmpty(t *testing.T) {
+	for _, value := range []string{" undefined ", "null", ""} {
+		if got := NormalizeRouterEffort(value); got != "" {
+			t.Fatalf("NormalizeRouterEffort(%q) = %q, want empty", value, got)
+		}
+	}
+}
+
+func TestRouterManagerReportsInvalidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy-router.json")
+	if err := os.WriteFile(path, []byte(`{"enabled":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRouterManager(path); err == nil || !strings.Contains(err.Error(), "parse router config") {
+		t.Fatalf("NewRouterManager() error = %v, want router parse error", err)
+	}
+}
+
+func TestRouterManagerRejectsSQLiteDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostics.db")
+	if err := os.WriteFile(path, append([]byte("SQLite format 3\x00"), make([]byte, 32)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRouterManager(path); err == nil || !strings.Contains(err.Error(), "SQLite database") {
+		t.Fatalf("NewRouterManager() error = %v, want SQLite database error", err)
+	}
+}

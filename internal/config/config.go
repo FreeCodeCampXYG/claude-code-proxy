@@ -142,11 +142,15 @@ func Load() (*Config, error) {
 
 	for _, loc := range locations {
 		if _, err := os.Stat(loc); err == nil {
-			// File exists, load it (overload to override existing env vars)
-			if err := godotenv.Overload(loc); err == nil {
-				fmt.Printf("📁 Loaded config from: %s\n", loc)
-				break
+			// The first existing config file is authoritative. Do not silently skip a
+			// malformed dotenv file, because that makes startup failures misleading.
+			if err := godotenv.Overload(loc); err != nil {
+				return nil, fmt.Errorf("load config from %s: %w (for Windows paths, prefer ROUTER_CONFIG_PATH=D:/data/ClaudeWork/proxy-router.json)", loc, err)
 			}
+			fmt.Printf("📁 Loaded config from: %s\n", loc)
+			break
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect config file %s: %w", loc, err)
 		}
 	}
 
@@ -158,7 +162,7 @@ func Load() (*Config, error) {
 	routerPath := getEnvOrDefault("ROUTER_CONFIG_PATH", DefaultRouterConfigPath())
 	router, err := NewRouterManager(routerPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load router config from ROUTER_CONFIG_PATH=%q: %w", routerPath, err)
 	}
 	cfg := &Config{
 		OpenAIAPIKey:      apiKey,

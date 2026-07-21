@@ -881,12 +881,13 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		cases := []struct {
 			name    string
 			content string
+			want    string
 		}{
-			{name: "small", content: "hello"},
-			{name: "medium", content: strings.Repeat("x", 5000)},
-			{name: "high", content: strings.Repeat("x", 130000)},
-			{name: "xhigh", content: strings.Repeat("x", 310000)},
-			{name: "max", content: strings.Repeat("x", 810000)},
+			{name: "small", content: "hello", want: "low"},
+			{name: "medium", content: strings.Repeat("x", 5000), want: "medium"},
+			{name: "high", content: strings.Repeat("x", 130000), want: "medium"},
+			{name: "xhigh", content: strings.Repeat("x", 310000), want: "medium"},
+			{name: "max", content: strings.Repeat("x", 810000), want: "medium"},
 		}
 		for _, tt := range cases {
 			t.Run(tt.name, func(t *testing.T) {
@@ -901,14 +902,14 @@ func TestRouterCostAwareRouting(t *testing.T) {
 				if req.Model != "gpt-5.6-sol" {
 					t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
 				}
-				if req.RoutedEffort != "" || req.ReasoningEffort != "" {
-					t.Fatalf("effort = routed %q reasoning %q, want omitted", req.RoutedEffort, req.ReasoningEffort)
+				if req.RoutedEffort != tt.want || req.ReasoningEffort != tt.want {
+					t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, tt.want)
 				}
 				if req.RouteModelOverridden {
 					t.Fatalf("RouteModelOverridden = true, want false when sol model is preserved")
 				}
-				if req.RouteEffortOverridden {
-					t.Fatalf("RouteEffortOverridden = true, want false for transparent NewAPI effort")
+				if !req.RouteEffortOverridden {
+					t.Fatalf("RouteEffortOverridden = false, want configured route override")
 				}
 			})
 		}
@@ -929,11 +930,11 @@ func TestRouterCostAwareRouting(t *testing.T) {
 				if req.Model != "gpt-5.6-sol" {
 					t.Fatalf("Model = %q, want incoming sol model preserved", req.Model)
 				}
-				if req.ReasoningEffort != effort || req.RoutedEffort != effort {
-					t.Fatalf("effort = routed %q reasoning %q, want explicit %q", req.RoutedEffort, req.ReasoningEffort, effort)
+				if req.ReasoningEffort != "medium" || req.RoutedEffort != "medium" {
+					t.Fatalf("effort = routed %q reasoning %q, want configured medium", req.RoutedEffort, req.ReasoningEffort)
 				}
-				if req.RouteEffortOverridden {
-					t.Fatalf("RouteEffortOverridden = true, want false for explicit transparent effort")
+				if !req.RouteEffortOverridden {
+					t.Fatalf("RouteEffortOverridden = false, want configured route override")
 				}
 			})
 		}

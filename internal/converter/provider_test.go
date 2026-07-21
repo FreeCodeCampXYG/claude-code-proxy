@@ -179,6 +179,8 @@ func TestNewAPIReasoningMapping(t *testing.T) {
 		{name: "sonnet without effort", model: "claude-sonnet-4", want: ""},
 		{name: "opus without effort", model: "claude-opus-4", want: ""},
 		{name: "thinking budget does not imply effort", model: "claude-opus-4", thinking: &models.ClaudeThinking{Type: "enabled", BudgetTokens: 24000}, want: ""},
+		{name: "literal undefined is omitted", model: "claude-opus-4", effort: " undefined ", want: ""},
+		{name: "literal null is omitted", model: "claude-opus-4", effort: "NULL", want: ""},
 		{name: "future effort is preserved", model: "claude-opus-4", effort: "automatic", want: "automatic"},
 		{name: "effort is normalized", model: "claude-opus-4", effort: "  Extra_High  ", want: "extra_high"},
 	}
@@ -201,6 +203,21 @@ func TestNewAPIReasoningMapping(t *testing.T) {
 			}
 			if req.ReasoningEffort != tt.want {
 				t.Errorf("ReasoningEffort = %q, want %q", req.ReasoningEffort, tt.want)
+			}
+			encoded, marshalErr := json.Marshal(req)
+			if marshalErr != nil {
+				t.Fatalf("json.Marshal(OpenAIRequest) error = %v", marshalErr)
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(OpenAIRequest) error = %v", err)
+			}
+			if tt.want == "" {
+				if _, exists := payload["reasoning_effort"]; exists {
+					t.Fatalf("reasoning_effort = %#v, want omitted", payload["reasoning_effort"])
+				}
+			} else if payload["reasoning_effort"] != tt.want {
+				t.Fatalf("reasoning_effort = %#v, want %q", payload["reasoning_effort"], tt.want)
 			}
 			if req.StreamOptions["include_usage"] != true {
 				t.Errorf("StreamOptions = %#v, want include_usage=true", req.StreamOptions)
@@ -226,31 +243,18 @@ func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
 	}
 }
 
-func TestNewAPIRouterEffortTransparentForwardingWithRouter(t *testing.T) {
+func TestNewAPIRouterEffortUsesMatchedRule(t *testing.T) {
 	cfg := routerProviderTestConfig(t, config.RouterConfig{
 		Enabled:  true,
 		Defaults: config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
 		Simple:   config.RouterRule{Enabled: true, Model: "gpt-5.4", Effort: "low", MaxChars: 4000},
 	})
 
-	tests := []struct {
-		name     string
-		incoming string
-		want     string
-	}{
-		{name: "absent effort remains omitted"},
-		{name: "known value is preserved", incoming: "low", want: "low"},
-		{name: "same as router is still caller value", incoming: "medium", want: "medium"},
-		{name: "higher than router is preserved", incoming: "high", want: "high"},
-		{name: "casing normalized", incoming: "  XHigh  ", want: "xhigh"},
-		{name: "future value is preserved", incoming: "automatic", want: "automatic"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, incoming := range []string{"", "undefined", "null", "low", "high", "automatic"} {
+		t.Run("incoming_"+incoming, func(t *testing.T) {
 			var outputConfig *models.ClaudeOutputConfig
-			if tt.incoming != "" {
-				outputConfig = &models.ClaudeOutputConfig{Effort: tt.incoming}
+			if incoming != "" {
+				outputConfig = &models.ClaudeOutputConfig{Effort: incoming}
 			}
 			req, err := ConvertRequest(models.ClaudeRequest{
 				Model:        "claude-sonnet-4",
@@ -260,11 +264,20 @@ func TestNewAPIRouterEffortTransparentForwardingWithRouter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConvertRequest() error = %v", err)
 			}
-			if req.ReasoningEffort != tt.want {
-				t.Fatalf("ReasoningEffort = %q, want %q", req.ReasoningEffort, tt.want)
+			wantOverridden := incoming != "low"
+			if req.ReasoningEffort != "low" || req.RoutedEffort != "low" || req.RouteEffortOverridden != wantOverridden {
+				t.Fatalf("effort = reasoning %q routed %q overridden %t, want low/low/%t", req.ReasoningEffort, req.RoutedEffort, req.RouteEffortOverridden, wantOverridden)
 			}
-			if req.RouteEffortOverridden {
-				t.Fatalf("RouteEffortOverridden = true, want false for transparent NewAPI effort")
+			encoded, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["reasoning_effort"] != "low" {
+				t.Fatalf("reasoning_effort = %#v, want low", payload["reasoning_effort"])
 			}
 		})
 	}
