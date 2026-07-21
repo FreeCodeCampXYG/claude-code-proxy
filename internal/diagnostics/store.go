@@ -693,7 +693,7 @@ func (store *Store) StoreStats() map[string]interface{} {
 		"dropped_total":  store.dropped.Load(),
 		"capture_bytes":  store.captureBytes.Load(),
 		"closing":        store.closing,
-		"worker_active":  store.worker.Counter() > 0,
+		"worker_active":  !store.closing && store.jobs != nil,
 	}
 }
 

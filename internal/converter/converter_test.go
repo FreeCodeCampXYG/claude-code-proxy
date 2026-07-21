@@ -311,7 +311,8 @@ func TestConvertRequest(t *testing.T) {
 	t.Run("request with GPT-compatible serial tools", func(t *testing.T) {
 		claudeReq := models.ClaudeRequest{
 			Model:     "claude-sonnet-4-20250514",
-			Messages: []models.ClaudeMessage{{Role: "user", Content: "Hello"}},
+			MaxTokens: 1024,
+			Messages:  []models.ClaudeMessage{{Role: "user", Content: "Hello"}},
 			Tools: []models.Tool{{
 				Name:        "get_weather",
 				Description: "Get weather information",
@@ -796,6 +797,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 	t.Run("historical tool_result does not poison later simple turn", func(t *testing.T) {
 		req, err := ConvertRequest(models.ClaudeRequest{
 			Model: "claude-sonnet-4",
+			MaxTokens: 1024,
 			Messages: []models.ClaudeMessage{
 				{Role: "user", Content: "read a file"},
 				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}}},
@@ -813,6 +815,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 	t.Run("immediate tool_result routes to tool_result", func(t *testing.T) {
 		req, err := ConvertRequest(models.ClaudeRequest{
 			Model: "claude-sonnet-4",
+			MaxTokens: 1024,
 			Messages: []models.ClaudeMessage{{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "test output"}}}},
 		}, cfg)
 		if err != nil {
@@ -823,8 +826,9 @@ func TestRouterCostAwareRouting(t *testing.T) {
 
 	t.Run("available tool schemas alone do not route to tool_use", func(t *testing.T) {
 		req, err := ConvertRequest(models.ClaudeRequest{
-			Model:    "claude-sonnet-4",
-			Messages: []models.ClaudeMessage{{Role: "user", Content: "hello"}},
+			Model:     "claude-sonnet-4",
+			MaxTokens: 1024,
+			Messages:  []models.ClaudeMessage{{Role: "user", Content: "hello"}},
 			Tools: []models.Tool{{
 				Name:        "read_file",
 				Description: "Read a file",
@@ -849,6 +853,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		longText := strings.Repeat("x", 140)
 		req, err := ConvertRequest(models.ClaudeRequest{
 			Model: "claude-sonnet-4",
+			MaxTokens: 1024,
 			Messages: []models.ClaudeMessage{{Role: "user", Content: []interface{}{
 				map[string]interface{}{"type": "text", "text": longText},
 				map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "short output"},
@@ -862,8 +867,9 @@ func TestRouterCostAwareRouting(t *testing.T) {
 
 	t.Run("default fallback uses main workhorse", func(t *testing.T) {
 		req, err := ConvertRequest(models.ClaudeRequest{
-			Model:    "claude-sonnet-4",
-			Messages: []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("normal task ", 500)}},
+			Model:     "claude-sonnet-4",
+			MaxTokens: 1024,
+			Messages:  []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("normal task ", 500)}},
 		}, cfg)
 		if err != nil {
 			t.Fatalf("ConvertRequest() error = %v", err)
@@ -885,8 +891,9 @@ func TestRouterCostAwareRouting(t *testing.T) {
 		for _, tt := range cases {
 			t.Run(tt.name, func(t *testing.T) {
 				req, err := ConvertRequest(models.ClaudeRequest{
-					Model:    "gpt-5.6-sol",
-					Messages: []models.ClaudeMessage{{Role: "user", Content: tt.content}},
+					Model:     "gpt-5.6-sol",
+					MaxTokens: 1024,
+					Messages:  []models.ClaudeMessage{{Role: "user", Content: tt.content}},
 				}, cfg)
 				if err != nil {
 					t.Fatalf("ConvertRequest() error = %v", err)
@@ -912,6 +919,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 			t.Run(effort, func(t *testing.T) {
 				req, err := ConvertRequest(models.ClaudeRequest{
 					Model:        "gpt-5.6-sol",
+					MaxTokens:    1024,
 					Messages:     []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("x", 810000)}},
 					OutputConfig: &models.ClaudeOutputConfig{Effort: effort},
 				}, cfg)
@@ -934,6 +942,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 	t.Run("router disabled preserves incoming sol model and explicit effort", func(t *testing.T) {
 		req, err := ConvertRequest(models.ClaudeRequest{
 			Model:        "gpt-5.6-sol",
+			MaxTokens:    1024,
 			Messages:     []models.ClaudeMessage{{Role: "user", Content: strings.Repeat("x", 810000)}},
 			OutputConfig: &models.ClaudeOutputConfig{Effort: "xhigh"},
 		}, &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI})
