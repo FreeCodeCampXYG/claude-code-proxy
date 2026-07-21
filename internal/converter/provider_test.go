@@ -226,7 +226,7 @@ func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
 	}
 }
 
-func TestNewAPIRouterEffortEnforcesMinimum(t *testing.T) {
+func TestNewAPIRouterEffortTransparentForwardingWithRouter(t *testing.T) {
 	cfg := routerProviderTestConfig(t, config.RouterConfig{
 		Enabled:  true,
 		Defaults: config.RouterRule{Enabled: true, Model: "gpt-5.5", Effort: "medium"},
@@ -234,21 +234,16 @@ func TestNewAPIRouterEffortEnforcesMinimum(t *testing.T) {
 	})
 
 	tests := []struct {
-		name               string
-		incoming           string
-		wantRouted         string
-		wantOverridden     bool
+		name     string
+		incoming string
+		want     string
 	}{
-		// Router defaults effort=medium; absent incoming gets overridden to medium
-		{name: "absent effort uses router default", wantRouted: "medium", wantOverridden: true},
-		// Incoming low < router medium → router wins (minimum enforcement)
-		{name: "lower than router default loses", incoming: "low", wantRouted: "medium", wantOverridden: true},
-		// Incoming equals router default → still counts as overridden
-		{name: "same as router default", incoming: "medium", wantRouted: "medium", wantOverridden: true},
-		// Incoming high > router medium → caller wins (no lowering)
-		{name: "higher than router default wins", incoming: "high", wantRouted: "high", wantOverridden: false},
-		// Normalized casing
-		{name: "casing normalized", incoming: "  XHigh  ", wantRouted: "xhigh", wantOverridden: false},
+		{name: "absent effort remains omitted"},
+		{name: "known value is preserved", incoming: "low", want: "low"},
+		{name: "same as router is still caller value", incoming: "medium", want: "medium"},
+		{name: "higher than router is preserved", incoming: "high", want: "high"},
+		{name: "casing normalized", incoming: "  XHigh  ", want: "xhigh"},
+		{name: "future value is preserved", incoming: "automatic", want: "automatic"},
 	}
 
 	for _, tt := range tests {
@@ -265,11 +260,11 @@ func TestNewAPIRouterEffortEnforcesMinimum(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConvertRequest() error = %v", err)
 			}
-			if req.ReasoningEffort != tt.wantRouted || req.RoutedEffort != tt.wantRouted {
-				t.Fatalf("effort = routed %q reasoning %q, want %q", req.RoutedEffort, req.ReasoningEffort, tt.wantRouted)
+			if req.ReasoningEffort != tt.want {
+				t.Fatalf("ReasoningEffort = %q, want %q", req.ReasoningEffort, tt.want)
 			}
-			if req.RouteEffortOverridden != tt.wantOverridden {
-				t.Fatalf("RouteEffortOverridden = %v, want %v", req.RouteEffortOverridden, tt.wantOverridden)
+			if req.RouteEffortOverridden {
+				t.Fatalf("RouteEffortOverridden = true, want false for transparent NewAPI effort")
 			}
 		})
 	}

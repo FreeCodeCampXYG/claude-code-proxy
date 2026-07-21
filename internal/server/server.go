@@ -104,8 +104,8 @@ func Start(cfg *config.Config) error {
 			"message": "Claude Code Proxy",
 			"version": ProxyVersion,
 			"status":  "running",
-			"config": fiber.Map{
-				"openai_base_url": cfg.OpenAIBaseURL,
+				"config": fiber.Map{
+					"openai_base_url": safeBaseURL(cfg.OpenAIBaseURL),
 				"routing_mode":    getRoutingMode(cfg),
 				"opus_model":      getOpusModel(cfg),
 				"sonnet_model":    getSonnetModel(cfg),
@@ -146,7 +146,7 @@ func Start(cfg *config.Config) error {
 	if cfg.PassthroughMode {
 		fmt.Printf("   Mode: PASSTHROUGH (direct to Anthropic API)\n")
 	} else {
-		fmt.Printf("   Mode: Conversion (via %s)\n", cfg.OpenAIBaseURL)
+		fmt.Printf("   Mode: Conversion (via %s)\n", safeBaseURL(cfg.OpenAIBaseURL))
 		fmt.Printf("   Model Routing: %s\n", getRoutingMode(cfg))
 
 		// Show actual model mappings

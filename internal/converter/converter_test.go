@@ -800,7 +800,7 @@ func TestRouterCostAwareRouting(t *testing.T) {
 			MaxTokens: 1024,
 			Messages: []models.ClaudeMessage{
 				{Role: "user", Content: "read a file"},
-				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}}},
+				{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "call-1", "name": "read", "input": map[string]interface{}{"path": "a.txt"}}}},
 				{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "call-1", "content": "file content"}}},
 				{Role: "assistant", Content: "done"},
 				{Role: "user", Content: "2+2?"},

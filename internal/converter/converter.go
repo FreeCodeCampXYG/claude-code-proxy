@@ -214,17 +214,9 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 
 	if provider == config.ProviderNewAPI {
 		// NewAPI must only receive the caller's explicit effort. When it is absent,
-		// omit reasoning_effort and let the upstream model use its default.
-		//
-		// When the router is enabled and its matched rule specifies an effort, that
-		// value takes precedence over the caller's explicit effort so that operators
-		// can enforce a minimum reasoning intensity per rule.
-		incoming := normalizeReasoningEffort(claudeReq, claudeReq.Model)
-		routed := incoming
-		if decision.Matched && decision.EffortOverridden && isHigherOrEqual(decision.Effort, incoming) {
-			routed = decision.Effort
-		}
-		openaiReq.ReasoningEffort = routed
+		// omit reasoning_effort and let the upstream model use its default. Do not
+		// synthesize or normalize unknown future values from router rules here.
+		openaiReq.ReasoningEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
 	}
 
 	// Set token limit using adaptive per-model detection
@@ -255,9 +247,9 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 		}
 	}
 
-	solModelPreserved := decision.Matched && shouldPreserveIncomingSolModel(openaiModel)
+	solModelPreserved := decision.Matched && shouldPreserveIncomingSolModel(claudeReq.Model)
 	openaiReq.IncomingEffort = normalizeReasoningEffort(claudeReq, claudeReq.Model)
-	openaiReq.RoutedEffort = openaiReq.ReasoningEffort
+	openaiReq.RoutedEffort = routedEffortMetadata(openaiReq.IncomingEffort, decision, solModelPreserved)
 	openaiReq.RouteRule = decision.Rule
 	openaiReq.IncomingModel = claudeReq.Model
 	openaiReq.RouteTextChars = routeMetadata.TextLength
@@ -265,7 +257,7 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	openaiReq.HasLastToolResult = routeMetadata.HasToolResult
 	openaiReq.RouterEnabled = routerEnabled(cfg)
 	openaiReq.RouteModelOverridden = decision.ModelOverridden && !solModelPreserved
-	openaiReq.RouteEffortOverridden = decision.EffortOverridden && isHigherOrEqual(decision.Effort, openaiReq.IncomingEffort)
+	openaiReq.RouteEffortOverridden = provider != config.ProviderNewAPI && !solModelPreserved && decision.EffortOverridden && shouldApplyRouterEffort(decision.Effort, openaiReq.IncomingEffort)
 
 	return openaiReq, nil
 }
@@ -278,7 +270,15 @@ func routerEnabled(cfg *config.Config) bool {
 }
 
 func shouldPreserveIncomingSolModel(model string) bool {
-	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "sol")
+	model = strings.ToLower(strings.TrimSpace(model))
+	return !strings.Contains(model, "claude") && strings.Contains(model, "sol")
+}
+
+func routedEffortMetadata(incoming string, decision RouteDecision, preserveIncomingModel bool) string {
+	if preserveIncomingModel || !decision.EffortOverridden || !shouldApplyRouterEffort(decision.Effort, incoming) {
+		return incoming
+	}
+	return decision.Effort
 }
 
 func normalizeReasoningEffort(claudeReq models.ClaudeRequest, _ string) string {
@@ -301,18 +301,26 @@ var effortRank = map[string]int{
 	"max":     6,
 }
 
-// isHigherOrEqual returns true when the router effort is at least as intense as
-// the incoming caller effort. An empty incoming value always loses to a non-empty
-// router value, matching the "enforce minimum" design intent.
-func isHigherOrEqual(routerEffort, incomingEffort string) bool {
-	rankR := effortRank[strings.ToLower(strings.TrimSpace(routerEffort))]
-	rankI := effortRank[strings.ToLower(strings.TrimSpace(incomingEffort))]
-	return rankR >= rankI
+// shouldApplyRouterEffort returns true only when a router rule can safely act as
+// a minimum for known effort values. Unknown explicit caller values are preserved
+// so future NewAPI efforts such as "automatic" are not silently downgraded.
+func shouldApplyRouterEffort(routerEffort, incomingEffort string) bool {
+	routerEffort = strings.ToLower(strings.TrimSpace(routerEffort))
+	incomingEffort = strings.ToLower(strings.TrimSpace(incomingEffort))
+	rankR, okR := effortRank[routerEffort]
+	if !okR || routerEffort == "" {
+		return false
+	}
+	if incomingEffort == "" {
+		return true
+	}
+	rankI, okI := effortRank[incomingEffort]
+	return okI && rankR >= rankI
 }
 
 func mapModelForRequest(claudeReq models.ClaudeRequest, cfg *config.Config, decision RouteDecision) string {
 	mappedModel := mapModel(claudeReq.Model, cfg)
-	if decision.Matched && shouldPreserveIncomingSolModel(mappedModel) {
+	if decision.Matched && shouldPreserveIncomingSolModel(claudeReq.Model) {
 		return mappedModel
 	}
 	if decision.ModelOverridden {
@@ -330,19 +338,14 @@ func routeRequest(claudeReq models.ClaudeRequest, cfg *config.Config) RouteDecis
 		return RouteDecision{}
 	}
 	features := extractRouteFeatures(claudeReq)
-	for _, candidate := range []struct {
-		name string
-		rule config.RouterRule
-		ok   bool
-	}{
-		{name: "long_context", rule: routerCfg.LongContext, ok: routerCfg.LongContext.MinChars > 0 && features.TextLength >= routerCfg.LongContext.MinChars},
-		{name: "simple", rule: routerCfg.Simple, ok: !features.HasTools && !features.HasToolResult && routerCfg.Simple.MaxChars > 0 && features.TextLength <= routerCfg.Simple.MaxChars},
-		{name: "tool_result", rule: routerCfg.ToolResult, ok: features.HasToolResult},
-		{name: "tool_use", rule: routerCfg.ToolUse, ok: features.HasTools},
-	} {
-		if decision := decisionFromRule(candidate.name, candidate.rule, candidate.ok); decision.Matched {
-			return decision
-		}
+	if decision := decisionFromRule("long_context", routerCfg.LongContext, routerCfg.LongContext.MinChars > 0 && features.TextLength >= routerCfg.LongContext.MinChars); decision.Matched {
+		return decision
+	}
+	if decision := decisionFromRule("tool_result", routerCfg.ToolResult, features.HasToolResult); decision.Matched {
+		return decision
+	}
+	if decision := decisionFromRule("tool_use", routerCfg.ToolUse, features.HasTools); decision.Matched {
+		return decision
 	}
 	text := strings.ToLower(routeText(claudeReq))
 	for _, group := range routerCfg.KeywordGroups {
@@ -354,6 +357,9 @@ func routeRequest(claudeReq models.ClaudeRequest, cfg *config.Config) RouteDecis
 				return RouteDecision{Matched: true, Rule: "keyword:" + group.Name, Model: strings.TrimSpace(group.Model), Effort: config.NormalizeRouterEffort(group.Effort), ModelOverridden: strings.TrimSpace(group.Model) != "", EffortOverridden: config.NormalizeRouterEffort(group.Effort) != ""}
 			}
 		}
+	}
+	if decision := decisionFromRule("simple", routerCfg.Simple, !features.HasTools && !features.HasToolResult && routerCfg.Simple.MaxChars > 0 && features.TextLength <= routerCfg.Simple.MaxChars); decision.Matched {
+		return decision
 	}
 	return decisionFromRule("default", routerCfg.Defaults, routerCfg.Defaults.Enabled)
 }

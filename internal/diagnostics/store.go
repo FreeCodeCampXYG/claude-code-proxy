@@ -647,30 +647,23 @@ func (store *Store) Close() error {
 	}
 	store.lifecycleMu.Unlock()
 
-	// Wait for the worker to drain pending jobs.  When a closeTimeout is set,
-	// we force-abandon remaining jobs after that duration instead of blocking
-	// indefinitely.  This prevents the proxy process from hanging on shutdown
-	// when many concurrent requests have backlogged diagnostics writes.
+	// Always wait for the worker before closing SQLite. The worker owns queued
+	// persistence and capture release; closing the database while it is still
+	// draining races with active writes and can leak reserved capture bytes.
 	if store.closeTimeout > 0 {
 		done := make(chan struct{})
 		go func() { store.worker.Wait(); close(done) }()
 		select {
 		case <-done:
-			// Worker finished normally within the deadline.
 		case <-time.After(store.closeTimeout):
-			remaining := len(store.jobs)
-			store.dropped.Add(uint64(remaining))
-			fmt.Printf("[WARN] Diagnostics Close timed out after %v; %d jobs abandoned, total dropped=%d\n",
-				store.closeTimeout, remaining, store.dropped.Load())
-			// The worker goroutine will exit on its own once it drains what it can.
+			fmt.Printf("[WARN] Diagnostics Close is still draining after %v; waiting for %d queued jobs before closing SQLite\n",
+				store.closeTimeout, len(store.jobs))
+			<-done
 		}
 	} else {
 		store.worker.Wait()
 	}
 
-	store.lifecycleMu.Lock()
-	store.jobs, store.stop = nil, nil
-	store.lifecycleMu.Unlock()
 	return store.db.Close()
 }
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -141,7 +142,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 		}
 		timestamp := time.Now().Format("15:04:05")
 		fmt.Printf("[%s] [REQ] %s model=%s key_label=%s in=%d out=%d tok/s=%.1f\n",
-			timestamp, cfg.OpenAIBaseURL, openaiReq.Model, cfg.OpenAIAPIKeyLabel, claudeResp.Usage.InputTokens,
+			timestamp, safeBaseURL(cfg.OpenAIBaseURL), openaiReq.Model, cfg.OpenAIAPIKeyLabel, claudeResp.Usage.InputTokens,
 			claudeResp.Usage.OutputTokens, tokensPerSec)
 	}
 
@@ -171,7 +172,10 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 		resp, err := callOpenAIStream(streamContext, openaiReq, cfg, trace)
 		if err != nil {
 			mapped := mapUpstreamErrorForDownstream(err, cfg)
-			_ = writeSSEError(w, mapped.StreamMessage, mapped.ErrorType)
+			if writeErr := writeSSEError(w, mapped.StreamMessage, mapped.ErrorType); writeErr != nil {
+				mapped.DiagnosticsError = diagnosticFailure(completionDownstreamWrite, failureDownstreamWrite, writeErr)
+			}
+			mapped.StatusCode = fiber.StatusOK
 			trace.setResponseBody([]byte(errorJSON(err)))
 			trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
 			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, err)
@@ -279,6 +283,12 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		}
 		return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData, Err: err}
 	}
+	failWithSSEError := func(original error, message string, errorType ...string) streamOutcome {
+		if writeErr := writeSSEError(w, message, errorType...); writeErr != nil {
+			return fail(diagnosticFailure(completionDownstreamWrite, failureDownstreamWrite, writeErr))
+		}
+		return fail(original)
+	}
 	stopOpenBlock := func() error {
 		if openBlockIndex < 0 {
 			return nil
@@ -344,8 +354,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
 				fmt.Errorf("invalid upstream stream JSON: %w", err))
-			_ = writeSSEError(w, streamErr.Error())
-			return fail(streamErr)
+			return failWithSSEError(streamErr, streamErr.Error())
 		}
 		chunkCount++
 
@@ -376,8 +385,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 			if isResponsesPayload(chunk) {
 				streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
 					fmt.Errorf("invalid upstream stream response: received Responses API payload; expected Chat Completions choices[].delta"))
-				_ = writeSSEError(w, streamErr.Error())
-				return fail(streamErr)
+				return failWithSSEError(streamErr, streamErr.Error())
 			}
 			continue // usage-only Chat Completions chunk
 		}
@@ -385,8 +393,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		if !ok {
 			streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
 				fmt.Errorf("invalid upstream stream response: choices[0] is not an object"))
-			_ = writeSSEError(w, streamErr.Error())
-			return fail(streamErr)
+			return failWithSSEError(streamErr, streamErr.Error())
 		}
 		delta, ok := choice["delta"].(map[string]interface{})
 		if !ok {
@@ -473,14 +480,12 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 	if err := scanner.Err(); err != nil {
 		streamErr := diagnosticFailure(completionUpstreamError, failureUpstreamRead,
 			fmt.Errorf("stream read error: %w", err))
-		_ = writeSSEError(w, streamErr.Error())
-		return fail(streamErr)
+		return failWithSSEError(streamErr, streamErr.Error())
 	}
 	if !doneSeen && !finishSeen {
 		streamErr := diagnosticFailure(completionUpstreamError, failureUpstreamTruncated,
 			fmt.Errorf("upstream stream truncated before completion"))
-		_ = writeSSEError(w, streamErr.Error())
-		return fail(streamErr)
+		return failWithSSEError(streamErr, streamErr.Error())
 	}
 	if err := stopOpenBlock(); err != nil {
 		return fail(err)
@@ -495,8 +500,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		if state.ID == "" || state.Name == "" {
 			streamErr := diagnosticFailure(completionInvalidResponse, failureInvalidResponse,
 				fmt.Errorf("incomplete upstream tool call at index %d", upstreamIndex))
-			_ = writeSSEError(w, streamErr.Error())
-			return fail(streamErr)
+			return failWithSSEError(streamErr, streamErr.Error())
 		}
 		toolIndex, err := startBlock("tool", "tool", map[string]interface{}{
 			"type": "tool_use", "id": state.ID, "name": state.Name, "input": map[string]interface{}{},
@@ -525,7 +529,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		inputTokens, _ := usageData["input_tokens"].(int); outputTokens, _ := usageData["output_tokens"].(int)
 		duration := time.Since(startTime).Seconds(); tokensPerSec := 0.0
 		if duration > 0 && outputTokens > 0 { tokensPerSec = float64(outputTokens) / duration }
-		fmt.Printf("[%s] [REQ] %s model=%s in=%d out=%d tok/s=%.1f\n", time.Now().Format("15:04:05"), cfg.OpenAIBaseURL, providerModel, inputTokens, outputTokens, tokensPerSec)
+		fmt.Printf("[%s] [REQ] %s model=%s key_label=%s in=%d out=%d tok/s=%.1f\n", time.Now().Format("15:04:05"), safeBaseURL(cfg.OpenAIBaseURL), providerModel, cfg.OpenAIAPIKeyLabel, inputTokens, outputTokens, tokensPerSec)
 	}
 	if cfg.Debug { fmt.Printf("[DEBUG] stream completed model=%s chunks=%d stop_reason=%s\n", providerModel, chunkCount, finalStopReason) }
 	semanticTools := make([]map[string]string, 0, len(toolIndices))
@@ -544,6 +548,17 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		"usage":       usageData,
 	})
 	return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData, Semantic: semantic}
+}
+
+func safeBaseURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return raw
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func usageInt(usage map[string]interface{}, name string) int {
@@ -1022,8 +1037,9 @@ func errorJSON(err error) string {
 }
 
 func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, proxyStatus int, contextWindowExceeded bool, err error) {
+	requestID := ""
 	if trace != nil {
-		return
+		requestID = trace.event.RequestID
 	}
 	upstreamStatus := 0
 	var statusErr *upstreamStatusError
@@ -1034,8 +1050,8 @@ func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model strin
 	if contextWindowExceeded {
 		completionState, failureKind = completionUpstreamError, failureContextWindowExceeded
 	}
-	fmt.Printf("[ERROR] Upstream request failed provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s context_window_exceeded=%t retryable=%t\n",
-		cfg.DetectProvider(), model, streaming, proxyStatus, upstreamStatus, completionState, failureKind, contextWindowExceeded, !contextWindowExceeded)
+	fmt.Printf("[ERROR] Upstream request failed request_id=%s provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s context_window_exceeded=%t retryable=%t\n",
+		requestID, cfg.DetectProvider(), model, streaming, proxyStatus, upstreamStatus, completionState, failureKind, contextWindowExceeded, !contextWindowExceeded)
 }
 
 func handleCountTokens(c *fiber.Ctx, cfg *config.Config) error {
