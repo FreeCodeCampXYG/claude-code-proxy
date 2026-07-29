@@ -175,12 +175,12 @@ func TestNewAPIReasoningMapping(t *testing.T) {
 		{name: "high", model: "claude-sonnet-4", effort: "high", want: "high"},
 		{name: "xhigh", model: "claude-sonnet-4", effort: "xhigh", want: "xhigh"},
 		{name: "max", model: "claude-sonnet-4", effort: "max", want: "max"},
-		{name: "haiku without effort", model: "claude-haiku-4", want: ""},
-		{name: "sonnet without effort", model: "claude-sonnet-4", want: ""},
-		{name: "opus without effort", model: "claude-opus-4", want: ""},
-		{name: "thinking budget does not imply effort", model: "claude-opus-4", thinking: &models.ClaudeThinking{Type: "enabled", BudgetTokens: 24000}, want: ""},
-		{name: "literal undefined is omitted", model: "claude-opus-4", effort: " undefined ", want: ""},
-		{name: "literal null is omitted", model: "claude-opus-4", effort: "NULL", want: ""},
+		{name: "haiku without effort", model: "claude-haiku-4", want: "medium"},
+		{name: "sonnet without effort", model: "claude-sonnet-4", want: "medium"},
+		{name: "opus without effort", model: "claude-opus-4", want: "medium"},
+		{name: "thinking budget does not imply effort", model: "claude-opus-4", thinking: &models.ClaudeThinking{Type: "enabled", BudgetTokens: 24000}, want: "medium"},
+		{name: "literal undefined uses default", model: "claude-opus-4", effort: " undefined ", want: "medium"},
+		{name: "literal null uses default", model: "claude-opus-4", effort: "NULL", want: "medium"},
 		{name: "future effort is preserved", model: "claude-opus-4", effort: "automatic", want: "automatic"},
 		{name: "effort is normalized", model: "claude-opus-4", effort: "  Extra_High  ", want: "extra_high"},
 	}
@@ -212,11 +212,7 @@ func TestNewAPIReasoningMapping(t *testing.T) {
 			if err := json.Unmarshal(encoded, &payload); err != nil {
 				t.Fatalf("json.Unmarshal(OpenAIRequest) error = %v", err)
 			}
-			if tt.want == "" {
-				if _, exists := payload["reasoning_effort"]; exists {
-					t.Fatalf("reasoning_effort = %#v, want omitted", payload["reasoning_effort"])
-				}
-			} else if payload["reasoning_effort"] != tt.want {
+			if payload["reasoning_effort"] != tt.want {
 				t.Fatalf("reasoning_effort = %#v, want %q", payload["reasoning_effort"], tt.want)
 			}
 			if req.StreamOptions["include_usage"] != true {
@@ -240,6 +236,17 @@ func TestNewAPIReasoningEffortForNonStreamingRequest(t *testing.T) {
 	}
 	if req.StreamOptions != nil {
 		t.Fatalf("StreamOptions = %#v, want nil for non-streaming request", req.StreamOptions)
+	}
+
+	defaultReq, err := ConvertRequest(models.ClaudeRequest{
+		Model:    "claude-opus-4",
+		Messages: []models.ClaudeMessage{{Role: "user", Content: "test"}},
+	}, &config.Config{OpenAIBaseURL: "https://newapi.example.com/v1", OpenAIProvider: config.ProviderNewAPI})
+	if err != nil {
+		t.Fatalf("ConvertRequest() default effort error = %v", err)
+	}
+	if defaultReq.ReasoningEffort != DefaultNewAPIEffort || defaultReq.RoutedEffort != DefaultNewAPIEffort {
+		t.Fatalf("default NewAPI effort = reasoning %q routed %q, want %q", defaultReq.ReasoningEffort, defaultReq.RoutedEffort, DefaultNewAPIEffort)
 	}
 }
 

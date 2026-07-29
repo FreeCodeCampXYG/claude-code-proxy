@@ -12,13 +12,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/claude-code-proxy/proxy/internal/converter"
 	"github.com/claude-code-proxy/proxy/internal/daemon"
 	"github.com/claude-code-proxy/proxy/internal/diagnostics"
+	"github.com/claude-code-proxy/proxy/internal/monitor"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -31,6 +31,7 @@ var ProxyVersion = "dev"
 // Start initializes and starts the HTTP server
 func Start(cfg *config.Config) error {
 	var diagnosticsStore *diagnostics.Store
+	stats := monitor.NewStats(200)
 	if cfg.DiagnosticsEnabled {
 		var err error
 		diagnosticsStore, err = diagnostics.Open(cfg.DiagnosticsDBPath, diagnostics.StoreOptions{
@@ -68,7 +69,7 @@ func Start(cfg *config.Config) error {
 		AllowHeaders: "*",
 	})
 	app.Use(func(c *fiber.Ctx) error {
-		if strings.HasPrefix(c.Path(), "/debug/logs") {
+		if localUIRoutePrefix(c.Path()) {
 			return c.Next()
 		}
 		return proxyCORS(c)
@@ -89,34 +90,16 @@ func Start(cfg *config.Config) error {
 			"diagnostics_enabled": diagnosticsStore != nil,
 		})
 	})
-
-	// Root endpoint - proxy info
-	app.Get("/", func(c *fiber.Ctx) error {
-		endpoints := fiber.Map{
-			"health":       "/health",
-			"messages":     "/v1/messages",
-			"count_tokens": "/v1/messages/count_tokens",
-		}
-		if diagnosticsStore != nil {
-			endpoints["diagnostics"] = "/debug/logs"
-		}
-		return c.JSON(fiber.Map{
-			"message": "Claude Code Proxy",
-			"version": ProxyVersion,
-			"status":  "running",
-				"config": fiber.Map{
-					"openai_base_url": safeBaseURL(cfg.OpenAIBaseURL),
-				"routing_mode":    getRoutingMode(cfg),
-				"opus_model":      getOpusModel(cfg),
-				"sonnet_model":    getSonnetModel(cfg),
-				"haiku_model":     getHaikuModel(cfg),
-			},
-			"endpoints": endpoints,
-		})
+	app.Get("/status", func(c *fiber.Ctx) error {
+		return c.JSON(rootStatusPayload(cfg, diagnosticsStore != nil))
 	})
 
+	setupDashboardEndpoints(app, cfg, diagnosticsStore)
+	setupMonitorEndpoints(app, cfg, stats)
+	setupProxySettingsEndpoints(app, cfg)
+
 	// Claude API endpoints
-	setupClaudeEndpoints(app, cfg, diagnosticsStore)
+	setupClaudeEndpointsWithMonitor(app, cfg, diagnosticsStore, stats)
 	setupDiagnosticsEndpoints(app, diagnosticsStore, cfg)
 
 	// Graceful shutdown
@@ -196,9 +179,13 @@ func getHaikuModel(cfg *config.Config) string {
 }
 
 func setupClaudeEndpoints(app *fiber.App, cfg *config.Config, store *diagnostics.Store) {
+	setupClaudeEndpointsWithMonitor(app, cfg, store, nil)
+}
+
+func setupClaudeEndpointsWithMonitor(app *fiber.App, cfg *config.Config, store *diagnostics.Store, stats *monitor.Stats) {
 	// Messages endpoint - main Claude API
 	app.Post("/v1/messages", func(c *fiber.Ctx) error {
-		return handleMessages(c, cfg, store)
+		return handleMessages(c, cfg, store, stats)
 	})
 
 	// Token counting endpoint

@@ -20,9 +20,10 @@ import (
 //   - ANTHROPIC_DEFAULT_SONNET_MODEL
 //   - ANTHROPIC_DEFAULT_HAIKU_MODEL
 const (
-	DefaultOpusModel   = "gpt-5.6-sol"
-	DefaultSonnetModel = "gpt-5.6-terra"
-	DefaultHaikuModel  = "gpt-5.6-luna"
+	DefaultOpusModel     = "gpt-5.6-sol"
+	DefaultSonnetModel   = "gpt-5.6-terra"
+	DefaultHaikuModel    = "gpt-5.6-luna"
+	DefaultNewAPIEffort  = "medium"
 )
 
 // extractSystemText extracts system text from Claude's flexible system parameter.
@@ -215,8 +216,12 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	incomingEffort := normalizeReasoningEffort(claudeReq, claudeReq.Model)
 	effectiveEffort := resolveReasoningEffort(incomingEffort, decision)
 	if provider == config.ProviderNewAPI {
-		// A matched router effort is an explicit operator policy. Otherwise NewAPI
-		// receives only the caller's normalized effort and omits empty values.
+		if effectiveEffort == "" {
+			effectiveEffort = DefaultNewAPIEffort
+		}
+		// NewAPI receives a concrete normalized effort. Empty, undefined, and null
+		// inbound values fall back to the project default to avoid invalid upstream
+		// reasoning_effort values and inconsistent diagnostics routing labels.
 		openaiReq.ReasoningEffort = effectiveEffort
 	}
 

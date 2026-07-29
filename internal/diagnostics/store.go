@@ -855,6 +855,8 @@ func (store *Store) normalizeEvent(event Event) (Event, error) {
 	if event.UpdatedAt.IsZero() {
 		event.UpdatedAt = event.CreatedAt
 	}
+	event.IncomingEffort = normalizeEffortLabel(event.IncomingEffort)
+	event.RoutedEffort = normalizeEffortLabel(event.RoutedEffort)
 	return event, nil
 }
 
@@ -1582,7 +1584,22 @@ func sortedCounts(values map[string]int) []AnalyticsCount {
 	sort.Slice(result, func(i, j int) bool { if result[i].Count == result[j].Count { return result[i].Name < result[j].Name }; return result[i].Count > result[j].Count })
 	return result
 }
-func emptyLabel(value string) string { if value == "" { return "unavailable" }; return value }
+func emptyLabel(value string) string {
+	value = normalizeEffortLabel(value)
+	if value == "" {
+		return "unavailable"
+	}
+	return value
+}
+
+func normalizeEffortLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "undefined" || value == "null" {
+		return ""
+	}
+	return value
+}
+
 func nullableBytes(value json.RawMessage) any { if len(value) == 0 { return nil }; return []byte(value) }
 func cloneRaw(value []byte) json.RawMessage { if len(value) == 0 { return nil }; return append(json.RawMessage(nil), value...) }
 func boolInt(value bool) int { if value { return 1 }; return 0 }

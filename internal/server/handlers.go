@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/claude-code-proxy/proxy/internal/converter"
 	"github.com/claude-code-proxy/proxy/internal/diagnostics"
+	"github.com/claude-code-proxy/proxy/internal/monitor"
 	"github.com/claude-code-proxy/proxy/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
@@ -37,8 +37,12 @@ func addOpenRouterHeaders(req *http.Request, cfg *config.Config) {
 // handleMessages is the main handler for /v1/messages endpoint.
 // It parses Claude requests, converts them to OpenAI format, and routes to either
 // streaming or non-streaming handlers based on the request's stream parameter.
-func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) error {
+func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store, stats *monitor.Stats) error {
 	trace := newDiagnosticsTrace(c, cfg, store)
+	if stats != nil {
+		stats.IncActive()
+		defer stats.DecActive()
+	}
 
 	var claudeReq models.ClaudeRequest
 	if err := c.BodyParser(&claudeReq); err != nil {
@@ -89,7 +93,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 	}
 
 	if streaming {
-		return handleStreamingMessages(c, openaiReq, claudeReq.Model, cfg, trace)
+		return handleStreamingMessages(c, openaiReq, claudeReq.Model, cfg, trace, stats)
 	}
 
 	startTime := time.Now()
@@ -134,6 +138,9 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 		fmt.Printf("[DEBUG] request_id=%s completed status=%d content_blocks=%d\n",
 			c.GetRespHeader("X-Request-ID"), fiber.StatusOK, len(claudeResp.Content))
 	}
+	if stats != nil {
+		stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Success: true, StatusCode: fiber.StatusOK, InputTokens: claudeResp.Usage.InputTokens, OutputTokens: claudeResp.Usage.OutputTokens, CacheTokens: openaiResp.Usage.PromptTokensDetails.CachedTokens + openaiResp.Usage.CacheCreationInputTokens, Duration: time.Since(startTime)})
+	}
 	if cfg.SimpleLog {
 		duration := time.Since(startTime).Seconds()
 		tokensPerSec := 0.0
@@ -152,7 +159,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store) 
 // handleStreamingMessages handles streaming SSE responses from the provider.
 // It forwards the OpenAI request, receives streaming chunks, and converts them to
 // Claude's SSE event format in real-time using streamOpenAIToClaude.
-func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, claudeModel string, cfg *config.Config, trace *diagnosticsTrace) error {
+func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, claudeModel string, cfg *config.Config, trace *diagnosticsTrace, stats *monitor.Stats) error {
 	startTime := time.Now()
 	requestContext := c.UserContext()
 
@@ -178,6 +185,9 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			mapped.StatusCode = fiber.StatusOK
 			trace.setResponseBody([]byte(errorJSON(err)))
 			trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
+			if stats != nil {
+				stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: mapped.StatusCode, Duration: time.Since(startTime)})
+			}
 			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, err)
 			return
 		}
@@ -185,10 +195,10 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 
 		outcome := streamOpenAIToClaude(w, resp.Body, claudeModel, openaiReq.Model, cfg, startTime, cancel)
 		responseMetadata, _ := json.Marshal(map[string]interface{}{
-			"streaming": true,
-			"chunks": outcome.Chunks,
+			"streaming":   true,
+			"chunks":      outcome.Chunks,
 			"stop_reason": outcome.StopReason,
-			"usage": outcome.Usage,
+			"usage":       outcome.Usage,
 		})
 		trace.setResponseBody(responseMetadata)
 		trace.setUpstreamResponseBytes(len(outcome.Semantic))
@@ -199,17 +209,24 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 		outputTokens := usageInt(outcome.Usage, "output_tokens")
 		cacheReadInputTokens := usageInt(outcome.Usage, "cache_read_input_tokens")
 		cacheCreationInputTokens := usageInt(outcome.Usage, "cache_creation_input_tokens")
+		cacheTokens := cacheReadInputTokens + cacheCreationInputTokens
 		if outcome.Err != nil {
 			completionState, failureKind := classifyFailure(outcome.Err)
 			trace.setOutcome(inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens,
 				outcome.Chunks, outcome.StopReason, completionState, failureKind,
 				failureKind == failureCanceled, failureKind == failureUpstreamTruncated)
 			trace.finish(fiber.StatusBadGateway, outcome.Err)
+			if stats != nil {
+				stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: fiber.StatusBadGateway, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
+			}
 			return
 		}
 		trace.setOutcome(inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens,
 			outcome.Chunks, outcome.StopReason, completionCompleted, "", false, false)
 		trace.finish(fiber.StatusOK, nil)
+		if stats != nil {
+			stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: true, StatusCode: fiber.StatusOK, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
+		}
 	})
 
 	return nil
@@ -683,30 +700,17 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
+	requestID := ""
 	if trace != nil {
-		httpReq.Header.Set("X-Request-ID", trace.event.RequestID)
+		requestID = trace.event.RequestID
 	}
-
-	// Skip auth for Ollama (localhost)
-	if !cfg.IsLocalhost() {
-		httpReq.Header.Set("Authorization", "Bearer "+cfg.OpenAIAPIKey)
-	}
-
-	// OpenRouter-specific headers
-	if cfg.DetectProvider() == config.ProviderOpenRouter {
-		addOpenRouterHeaders(httpReq, cfg)
-	}
+	buildUpstreamRequest(httpReq, cfg, requestID)
 
 	// Use transport phase timeouts without imposing a total streaming deadline.
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout: 15 * time.Second,
-		ResponseHeaderTimeout: 90 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}}
+	client, err := newStreamingUpstreamClient(cfg)
+	if err != nil {
+		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamError, err)
+	}
 
 	// Make request
 	resp, err := client.Do(httpReq)
@@ -938,26 +942,16 @@ func callOpenAIInternal(ctx context.Context, req *models.OpenAIRequest, cfg *con
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
+	requestID := ""
 	if trace != nil {
-		httpReq.Header.Set("X-Request-ID", trace.event.RequestID)
+		requestID = trace.event.RequestID
 	}
-
-	// Skip auth for Ollama (localhost) - Ollama doesn't require authentication
-	if !cfg.IsLocalhost() {
-		httpReq.Header.Set("Authorization", "Bearer "+cfg.OpenAIAPIKey)
-	}
-
-	// OpenRouter-specific headers for better rate limits
-	if cfg.DetectProvider() == config.ProviderOpenRouter {
-		addOpenRouterHeaders(httpReq, cfg)
-	}
+	buildUpstreamRequest(httpReq, cfg, requestID)
 
 	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 90 * time.Second,
+	client, err := newUnaryUpstreamClient(cfg)
+	if err != nil {
+		return nil, diagnosticFailure(completionUpstreamError, failureUpstreamError, err)
 	}
 
 	// Make request

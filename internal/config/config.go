@@ -83,6 +83,15 @@ type Config struct {
 	OpenAIProvider  ProviderType
 	AnthropicAPIKey string
 
+	// Upstream proxy settings
+	UpstreamProxyEnabled  bool
+	UpstreamProxyType     string
+	UpstreamProxyAddr     string
+	UpstreamProxyUser     string
+	UpstreamProxyPass     string
+	ProxyConfigPath       string
+	ProxyRuntime          *ProxyManager
+
 	// Diagnostics storage
 	DiagnosticsEnabled          bool
 	DiagnosticsCaptureContent   bool
@@ -164,6 +173,11 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load router config from ROUTER_CONFIG_PATH=%q: %w", routerPath, err)
 	}
+	proxyPath := getEnvOrDefault("UPSTREAM_PROXY_CONFIG_PATH", DefaultProxyConfigPath())
+	proxyRuntime, err := NewProxyManager(proxyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load proxy config from UPSTREAM_PROXY_CONFIG_PATH=%q: %w", proxyPath, err)
+	}
 	cfg := &Config{
 		OpenAIAPIKey:      apiKey,
 		OpenAIAPIKeyIndex: apiKeyIndex,
@@ -171,6 +185,15 @@ func Load() (*Config, error) {
 		OpenAIBaseURL:   strings.TrimRight(getEnvOrDefault("OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
 		OpenAIProvider:  ProviderType(strings.ToLower(strings.TrimSpace(os.Getenv("OPENAI_PROVIDER")))),
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
+
+		// Upstream proxy settings
+		UpstreamProxyEnabled: getEnvAsBoolOrDefault("UPSTREAM_PROXY_ENABLED", false),
+		UpstreamProxyType:    strings.ToLower(strings.TrimSpace(os.Getenv("UPSTREAM_PROXY_TYPE"))),
+		UpstreamProxyAddr:    strings.TrimSpace(os.Getenv("UPSTREAM_PROXY_ADDR")),
+		UpstreamProxyUser:    strings.TrimSpace(os.Getenv("UPSTREAM_PROXY_USER")),
+		UpstreamProxyPass:    strings.TrimSpace(os.Getenv("UPSTREAM_PROXY_PASS")),
+		ProxyConfigPath:      proxyPath,
+		ProxyRuntime:         proxyRuntime,
 
 		// Diagnostics storage
 		DiagnosticsEnabled:          getEnvAsBoolOrDefault("DIAGNOSTICS_ENABLED", false),
@@ -216,6 +239,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.OpenAIProvider != "" && !isValidProvider(cfg.OpenAIProvider) {
 		return nil, fmt.Errorf("OPENAI_PROVIDER must be one of openrouter, openai, ollama, newapi, generic")
+	}
+	if err := ValidateProxyConfig(ProxyConfig{Enabled: cfg.UpstreamProxyEnabled, Type: cfg.UpstreamProxyType, Address: cfg.UpstreamProxyAddr, Username: cfg.UpstreamProxyUser, Password: cfg.UpstreamProxyPass}); err != nil {
+		return nil, err
 	}
 	if cfg.DiagnosticsRetention <= 0 {
 		return nil, fmt.Errorf("DIAGNOSTICS_RETENTION must be a positive Go duration")

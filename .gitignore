@@ -43,3 +43,5 @@ session.jsonl
 
 # Daemon files
 *.pid
+/开发计划.md
+/.claude/worktrees/agent-*/

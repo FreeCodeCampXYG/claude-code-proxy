@@ -250,7 +250,22 @@ func TestModelOverrides(t *testing.T) {
 	}
 }
 
-func TestModelDefaults(t *testing.T) {
+func TestProxySettingsConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+	t.Setenv("UPSTREAM_PROXY_ENABLED", "true")
+	t.Setenv("UPSTREAM_PROXY_TYPE", "http")
+	t.Setenv("UPSTREAM_PROXY_ADDR", "127.0.0.1:7890")
+	t.Setenv("UPSTREAM_PROXY_USER", "user")
+	t.Setenv("UPSTREAM_PROXY_PASS", "pass")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UpstreamProxyEnabled || cfg.UpstreamProxyType != "http" || cfg.UpstreamProxyAddr != "127.0.0.1:7890" {
+		t.Fatalf("unexpected proxy config: %#v", cfg)
+	}
+}
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
 

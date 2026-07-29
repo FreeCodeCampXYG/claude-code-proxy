@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>流量监控</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#0b1220;--panel:#111827;--line:#243247;--text:#e5eefb;--muted:#94a3b8;--accent:#60a5fa}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:16px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#0f172a;border:1px solid var(--line);border-radius:12px;padding:14px}.card strong{display:block;font-size:1.1rem}.muted{color:var(--muted)}pre{margin:0;white-space:pre-wrap;overflow:auto}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>流量监控</h1>
+      <p class="muted">实时监控骨架已接入。后续会继续补 SSE、趋势图、活跃连接与日志流。</p>
+      <script>window.__localPageToken=window.__localPageToken||'';</script>
+    </section>
+    <section class="panel cards" id="cards"></section>
+    <section class="panel">
+      <h2>启动快照</h2>
+      <pre id="snapshot">__MONITOR_BOOTSTRAP__</pre>
+    </section>
+  </main>
+  <script>
+    const boot = JSON.parse(document.getElementById('snapshot').textContent);
+    const cards = document.getElementById('cards');
+    const totals = boot.snapshot ? boot.snapshot.totals || {} : {};
+    const items = [
+      ['Provider', boot.provider || 'unknown'],
+      ['Upstream', boot.upstream || 'unknown'],
+      ['请求总数', totals.requests || 0],
+      ['成功', totals.success || 0],
+      ['失败', totals.failure || 0],
+      ['活跃连接', totals.active_requests || 0]
+    ];
+    for (const [label, value] of items) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = '<span class="muted">' + label + '</span><strong>' + value + '</strong>';
+      cards.appendChild(card);
+    }
+  </script>
+</body>
+</html>

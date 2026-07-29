@@ -165,8 +165,8 @@ func (trace *diagnosticsTrace) setRouting(req *models.OpenAIRequest) {
 	}
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
-	trace.event.IncomingEffort = req.IncomingEffort
-	trace.event.RoutedEffort = req.RoutedEffort
+	trace.event.IncomingEffort = config.NormalizeRouterEffort(req.IncomingEffort)
+	trace.event.RoutedEffort = config.NormalizeRouterEffort(req.RoutedEffort)
 	trace.event.RouteRule = req.RouteRule
 	trace.event.IncomingModel = req.IncomingModel
 	trace.event.RouteTextChars = req.RouteTextChars
@@ -472,10 +472,10 @@ func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store, cfg *co
 	if store == nil {
 		return
 	}
-	token := newRequestID()
-	group := app.Group("/debug/logs", requireLoopback, diagnosticsSecurity(token))
-	group.Get("", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, token) })
-	group.Get("/", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, token) })
+	options := newLocalPageOptions("/debug/logs", "X-Diagnostics-Token", "diagnostics token required")
+	group := setupLocalPageGroup(app, options)
+	group.Get("", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, options.Token) })
+	group.Get("/", func(c *fiber.Ctx) error { return diagnosticsHTMLWithToken(c, options.Token) })
 	group.Get("/status", func(c *fiber.Ctx) error { return diagnosticsStoreStatus(c, store) })
 	group.Get("/events", func(c *fiber.Ctx) error { return diagnosticsList(c, store) })
 	group.Get("/analytics", func(c *fiber.Ctx) error { return diagnosticsAnalytics(c, store) })
@@ -488,23 +488,6 @@ func setupDiagnosticsEndpoints(app *fiber.App, store *diagnostics.Store, cfg *co
 	group.Get("/:id/raw", func(c *fiber.Ctx) error { return diagnosticsRaw(c, store) })
 	group.Get("/:id", func(c *fiber.Ctx) error { return diagnosticsDetail(c, store) })
 	group.Delete("/:id", func(c *fiber.Ctx) error { return diagnosticsDelete(c, store) })
-}
-
-func diagnosticsSecurity(token string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		c.Set("Cache-Control", "no-store")
-		c.Set("X-Content-Type-Options", "nosniff")
-		c.Set("Referrer-Policy", "no-referrer")
-		c.Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
-		origin := strings.TrimSpace(c.Get("Origin"))
-		if origin != "" && !isLoopbackOrigin(origin) {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "diagnostics origin must be loopback"})
-		}
-		if c.Path() != "/debug/logs" && c.Path() != "/debug/logs/" && c.Get("X-Diagnostics-Token") != token {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "diagnostics token required"})
-		}
-		return c.Next()
-	}
 }
 
 func isLoopbackOrigin(value string) bool {
@@ -771,13 +754,7 @@ func diagnosticsHTML(c *fiber.Ctx) error {
 }
 
 func diagnosticsHTMLWithToken(c *fiber.Ctx, token string) error {
-	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
-	page := diagnosticsPageHTML
-	if token != "" {
-		encoded, _ := json.Marshal(token)
-		page = strings.Replace(page, "window.__diagnosticsToken=window.__diagnosticsToken||'';", "window.__diagnosticsToken="+string(encoded)+";", 1)
-	}
-	return c.SendString(page)
+	return embeddedHTMLWithToken(c, diagnosticsPageHTML, token, "window.__diagnosticsToken=window.__diagnosticsToken||'';")
 }
 
 //go:embed diagnostics.html
