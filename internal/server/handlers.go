@@ -171,6 +171,12 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
+	requestID := ""
+	if trace != nil {
+		requestID = trace.event.RequestID
+	}
+	provider := string(cfg.DetectProvider())
+
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
 		// Fiber/fasthttp does not expose a reliable client-disconnect context here.
 		// The dependable boundary is a failed stream write/conversion; cancel the
@@ -185,9 +191,9 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 				trace.setResponseBody([]byte(errorJSON(err)))
 				trace.finish(fiber.StatusOK, err)
 				if stats != nil {
-					stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: fiber.StatusOK, Duration: time.Since(startTime)})
+					stats.Record(monitor.Event{RequestID: requestID, Model: openaiReq.Model, Provider: provider, Streaming: true, Success: false, StatusCode: fiber.StatusOK, Duration: time.Since(startTime)})
 				}
-				fmt.Printf("[ERROR] Streaming response panic request_id=%s provider=%s model=%s panic=%v\n", c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, recovered)
+				fmt.Printf("[ERROR] Streaming response panic request_id=%s provider=%s model=%s panic=%v\n", requestID, provider, openaiReq.Model, recovered)
 			}
 		}()
 
@@ -202,7 +208,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			trace.setResponseBody([]byte(errorJSON(err)))
 			trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
 			if stats != nil {
-				stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: mapped.StatusCode, Duration: time.Since(startTime)})
+				stats.Record(monitor.Event{RequestID: requestID, Model: openaiReq.Model, Provider: provider, Streaming: true, Success: false, StatusCode: mapped.StatusCode, Duration: time.Since(startTime)})
 			}
 			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, mapped.Retryable, err)
 			return
@@ -233,7 +239,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 				failureKind == failureCanceled, failureKind == failureUpstreamTruncated)
 			trace.finish(fiber.StatusBadGateway, outcome.Err)
 			if stats != nil {
-				stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: fiber.StatusBadGateway, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
+				stats.Record(monitor.Event{RequestID: requestID, Model: openaiReq.Model, Provider: provider, Streaming: true, Success: false, StatusCode: fiber.StatusBadGateway, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
 			}
 			return
 		}
@@ -241,7 +247,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			outcome.Chunks, outcome.StopReason, completionCompleted, "", false, false)
 		trace.finish(fiber.StatusOK, nil)
 		if stats != nil {
-			stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: true, StatusCode: fiber.StatusOK, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
+			stats.Record(monitor.Event{RequestID: requestID, Model: openaiReq.Model, Provider: provider, Streaming: true, Success: true, StatusCode: fiber.StatusOK, InputTokens: inputTokens, OutputTokens: outputTokens, CacheTokens: cacheTokens, Duration: time.Since(startTime)})
 		}
 	})
 
