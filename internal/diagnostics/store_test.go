@@ -83,7 +83,37 @@ func TestStoreInsertBundleRollsBackEventWhenContentInsertFails(t *testing.T) {
 	}
 }
 
-func TestStoreInsertBundleDefersContentForeignKeysUntilCommit(t *testing.T) {
+func TestStoreInsertBundleRecoversAfterForeignKeyFailure(t *testing.T) {
+	store := openTestStore(t, StoreOptions{CaptureContent: true})
+	if _, err := store.db.Exec(`CREATE TRIGGER orphan_diagnostics_content
+		AFTER INSERT ON diagnostics_content
+		BEGIN
+			DELETE FROM diagnostics_events WHERE request_id = NEW.request_id;
+		END;`); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.insertBundle(t.Context(), Event{RequestID: "fk-failure"}, []ContentSnapshot{{
+		RequestID: "fk-failure",
+		Boundary:  ContentBoundaryClaudeRequest,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Fatalf("insertBundle() error = %v, want foreign key failure", err)
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER orphan_diagnostics_content`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.insertBundle(t.Context(), Event{RequestID: "after-fk-failure"}, []ContentSnapshot{{
+		RequestID: "after-fk-failure",
+		Boundary:  ContentBoundaryClaudeRequest,
+		Content:   json.RawMessage(`{"safe":true}`),
+	}}); err != nil {
+		t.Fatalf("insertBundle() after foreign key failure = %v", err)
+	}
+}
+
+func TestStoreInsertBundlePersistsParentBeforeContent(t *testing.T) {
 	store := openTestStore(t, StoreOptions{CaptureContent: true})
 	if err := store.insertBundle(t.Context(), Event{RequestID: "deferred-bundle"}, []ContentSnapshot{{
 		RequestID: "deferred-bundle",

@@ -52,12 +52,13 @@ jobs:
           try {
             $listener.Start()
             Write-Output "MOCK_READY"
-            $client = $listener.AcceptTcpClient()
-            try {
-              $stream = $client.GetStream()
-              $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
-              while (($line = $reader.ReadLine()) -ne $null -and $line -ne '') {}
-              $body = @'
+            for ($requestIndex = 0; $requestIndex -lt 3; $requestIndex++) {
+              $client = $listener.AcceptTcpClient()
+              try {
+                $stream = $client.GetStream()
+                $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
+                while (($line = $reader.ReadLine()) -ne $null -and $line -ne '') {}
+                $body = @'
         data: {"choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}
 
         data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}
@@ -65,14 +66,15 @@ jobs:
         data: [DONE]
 
         '@
-              $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-              $headers = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
-              $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headers)
-              $stream.Write($headerBytes, 0, $headerBytes.Length)
-              $stream.Write($bodyBytes, 0, $bodyBytes.Length)
-              $stream.Flush()
-            } finally {
-              $client.Dispose()
+                $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+                $headers = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+                $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headers)
+                $stream.Write($headerBytes, 0, $headerBytes.Length)
+                $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+                $stream.Flush()
+              } finally {
+                $client.Dispose()
+              }
             }
           } finally {
             $listener.Stop()

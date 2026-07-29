@@ -1031,9 +1031,6 @@ func (store *Store) insertBundle(ctx context.Context, event Event, snapshots []C
 			}
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
-		return fmt.Errorf("defer diagnostics content foreign keys: %w", err)
-	}
 	if err := store.upsertEvent(ctx, tx, event); err != nil {
 		return err
 	}
