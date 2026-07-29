@@ -177,6 +177,19 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 		// upstream request at that point and always when this writer lifetime ends.
 		streamContext, cancel := context.WithCancel(requestContext)
 		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err := diagnosticFailure(completionUpstreamError, failureUpstreamError,
+					fmt.Errorf("streaming response panic: %v", recovered))
+				_ = writeSSEError(w, err.Error(), "api_error", false)
+				trace.setResponseBody([]byte(errorJSON(err)))
+				trace.finish(fiber.StatusOK, err)
+				if stats != nil {
+					stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: fiber.StatusOK, Duration: time.Since(startTime)})
+				}
+				fmt.Printf("[ERROR] Streaming response panic request_id=%s provider=%s model=%s panic=%v\n", c.GetRespHeader("X-Request-ID"), cfg.DetectProvider(), openaiReq.Model, recovered)
+			}
+		}()
 
 		trace.stage("stream_started", "")
 		resp, err := callOpenAIStream(streamContext, openaiReq, cfg, trace)

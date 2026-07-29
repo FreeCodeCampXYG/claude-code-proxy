@@ -96,7 +96,9 @@ jobs:
         $env:OPENAI_PROVIDER = "newapi"
         $env:PORT = "18082"
         $env:DIAGNOSTICS_DB_PATH = Join-Path $env:RUNNER_TEMP "claude-code-proxy-diagnostics.db"
-        $process = Start-Process -FilePath "$PWD/claude-code-proxy.exe" -ArgumentList "-d" -PassThru
+        $proxyStdout = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.out.log"
+        $proxyStderr = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.err.log"
+        $process = Start-Process -FilePath "$PWD/claude-code-proxy.exe" -ArgumentList "-d" -RedirectStandardOutput $proxyStdout -RedirectStandardError $proxyStderr -PassThru
         try {
           $health = $null
           for ($attempt = 0; $attempt -lt 30; $attempt++) {
@@ -140,6 +142,12 @@ jobs:
           $analytics = Invoke-RestMethod "http://127.0.0.1:18082/debug/logs/analytics" -Headers $diagnosticsHeaders -TimeoutSec 5
           if ([int]$analytics.total -lt 1) { throw "diagnostics analytics total was less than one: $($analytics | ConvertTo-Json -Compress)" }
           if ($health.diagnostics_enabled -ne $true) { throw "diagnostics were not enabled" }
+        } catch {
+          $exitCode = if ($process.HasExited) { $process.ExitCode } else { "running" }
+          Write-Host "Proxy exited: $($process.HasExited) code=$exitCode"
+          if (Test-Path $proxyStdout) { Write-Host "--- proxy stdout ---"; Get-Content $proxyStdout -ErrorAction SilentlyContinue }
+          if (Test-Path $proxyStderr) { Write-Host "--- proxy stderr ---"; Get-Content $proxyStderr -ErrorAction SilentlyContinue }
+          throw
         } finally {
           if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           Stop-Job -Job $mock -ErrorAction SilentlyContinue
