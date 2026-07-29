@@ -201,7 +201,9 @@ func TestHandleMessagesContextWindowRewriteConfiguration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadGateway)
 				_, _ = io.WriteString(w, tt.body)
@@ -233,11 +235,95 @@ func TestHandleMessagesContextWindowRewriteConfiguration(t *testing.T) {
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("status=%d, want %d", resp.StatusCode, tt.wantStatus)
 			}
+			if tt.wantKind == failureContextWindowExceeded && calls != 1 {
+				t.Fatalf("context-window upstream calls=%d, want one call", calls)
+			}
+			if tt.wantKind != failureContextWindowExceeded && calls != upstreamMaxAttempts {
+				t.Fatalf("transient upstream calls=%d, want %d", calls, upstreamMaxAttempts)
+			}
 			event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
 			if event.FailureKind != tt.wantKind {
 				t.Fatalf("failure kind=%q, want %q; event=%#v", event.FailureKind, tt.wantKind, event)
 			}
 		})
+	}
+}
+
+func TestHandleMessagesRetriesTransientUpstreamThenSucceeds(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls < upstreamMaxAttempts {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"temporary gateway failure"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	store := openDiagnosticsTestStore(t)
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != upstreamMaxAttempts {
+		t.Fatalf("status=%d upstream calls=%d, want 200 and %d calls", resp.StatusCode, calls, upstreamMaxAttempts)
+	}
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
+	if event.AttemptCount != upstreamMaxAttempts || event.RetryCount != upstreamMaxAttempts-1 || event.CompletionState != completionCompleted {
+		t.Fatalf("unexpected diagnostics after retry success: %#v", event)
+	}
+}
+
+func TestHandleStreamingRetriesTransientUpstreamThenSucceeds(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < upstreamMaxAttempts {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"temporary gateway failure"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	store := openDiagnosticsTestStore(t)
+	cfg := &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "secret-key"}
+	app := fiber.New()
+	app.Use(requestIDMiddleware)
+	setupClaudeEndpoints(app, cfg, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || calls != upstreamMaxAttempts || !strings.Contains(string(body), "ok") {
+		t.Fatalf("status=%d upstream calls=%d body=%s, want streamed success after retries", resp.StatusCode, calls, body)
+	}
+	event := awaitDiagnosticEvent(t, store, resp.Header.Get("X-Request-ID"))
+	if event.AttemptCount != upstreamMaxAttempts || event.RetryCount != upstreamMaxAttempts-1 || event.CompletionState != completionCompleted {
+		t.Fatalf("unexpected streaming diagnostics after retry success: %#v", event)
 	}
 }
 

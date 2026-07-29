@@ -16,12 +16,8 @@ func TestRootDashboardAndStatusRoutes(t *testing.T) {
 	app := fiber.New()
 	setupDashboardEndpoints(app, &config.Config{OpenAIBaseURL: "https://api.openai.com/v1"}, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "127.0.0.1:1234"
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	baseURL := startLoopbackTestServer(t, app)
+	resp := getLoopbackTest(t, baseURL, "/")
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("dashboard status = %d", resp.StatusCode)
@@ -35,12 +31,7 @@ func TestRootDashboardAndStatusRoutes(t *testing.T) {
 		}
 	}
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
-	statusReq.RemoteAddr = "127.0.0.1:1234"
-	statusResp, err := app.Test(statusReq)
-	if err != nil {
-		t.Fatal(err)
-	}
+	statusResp := getLoopbackTest(t, baseURL, "/status")
 	defer statusResp.Body.Close()
 	if statusResp.StatusCode != http.StatusOK {
 		t.Fatalf("status route status = %d", statusResp.StatusCode)

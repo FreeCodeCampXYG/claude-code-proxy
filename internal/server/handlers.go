@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -21,6 +22,8 @@ import (
 	"github.com/claude-code-proxy/proxy/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
+
+const upstreamMaxAttempts = 3
 
 // addOpenRouterHeaders adds OpenRouter-specific HTTP headers for better rate limits.
 // Sets HTTP-Referer and X-Title headers when configured, which helps with OpenRouter's
@@ -102,7 +105,7 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store, 
 		mapped := mapUpstreamErrorForDownstream(err, cfg)
 		trace.setResponseBody([]byte(errorJSON(err)))
 		trace.finish(mapped.StatusCode, mapped.DiagnosticsError)
-		logUpstreamFailure(trace, cfg, openaiReq.Model, false, mapped.StatusCode, mapped.ContextWindowExceeded, err)
+		logUpstreamFailure(trace, cfg, openaiReq.Model, false, mapped.StatusCode, mapped.ContextWindowExceeded, mapped.Retryable, err)
 		return c.Status(mapped.StatusCode).JSON(mapped.Body)
 	}
 
@@ -179,7 +182,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 		resp, err := callOpenAIStream(streamContext, openaiReq, cfg, trace)
 		if err != nil {
 			mapped := mapUpstreamErrorForDownstream(err, cfg)
-			if writeErr := writeSSEError(w, mapped.StreamMessage, mapped.ErrorType); writeErr != nil {
+			if writeErr := writeSSEError(w, mapped.StreamMessage, mapped.ErrorType, mapped.Retryable); writeErr != nil {
 				mapped.DiagnosticsError = diagnosticFailure(completionDownstreamWrite, failureDownstreamWrite, writeErr)
 			}
 			mapped.StatusCode = fiber.StatusOK
@@ -188,7 +191,7 @@ func handleStreamingMessages(c *fiber.Ctx, openaiReq *models.OpenAIRequest, clau
 			if stats != nil {
 				stats.Record(monitor.Event{RequestID: c.GetRespHeader("X-Request-ID"), Model: openaiReq.Model, Provider: string(cfg.DetectProvider()), Streaming: true, Success: false, StatusCode: mapped.StatusCode, Duration: time.Since(startTime)})
 			}
-			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, err)
+			logUpstreamFailure(trace, cfg, openaiReq.Model, true, mapped.StatusCode, mapped.ContextWindowExceeded, mapped.Retryable, err)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -301,7 +304,11 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, claudeModel, provid
 		return streamOutcome{Chunks: chunkCount, StopReason: finalStopReason, Usage: usageData, Err: err}
 	}
 	failWithSSEError := func(original error, message string, errorType ...string) streamOutcome {
-		if writeErr := writeSSEError(w, message, errorType...); writeErr != nil {
+		kind := "api_error"
+		if len(errorType) > 0 {
+			kind = errorType[0]
+		}
+		if writeErr := writeSSEError(w, message, kind, true); writeErr != nil {
 			return fail(diagnosticFailure(completionDownstreamWrite, failureDownstreamWrite, writeErr))
 		}
 		return fail(original)
@@ -599,82 +606,80 @@ func writeSSEEvent(w *bufio.Writer, event string, data interface{}) error {
 }
 
 // writeSSEError writes an error event.
-func writeSSEError(w *bufio.Writer, message string, errorType ...string) error {
+func writeSSEError(w *bufio.Writer, message string, errorType string, retryable bool) error {
 	kind := "api_error"
-	if len(errorType) > 0 && strings.TrimSpace(errorType[0]) != "" {
-		kind = errorType[0]
+	if strings.TrimSpace(errorType) != "" {
+		kind = errorType
 	}
 	return writeSSEEvent(w, "error", map[string]interface{}{
-		"type": "error", "error": map[string]interface{}{"type": kind, "message": message},
+		"type": "error", "error": map[string]interface{}{"type": kind, "message": message, "retryable": retryable},
 	})
 }
 
-// callOpenAI makes an HTTP request to the OpenAI API with automatic retry logic
-// for max_completion_tokens parameter errors. Uses per-model capability caching.
+// callOpenAI makes an HTTP request to the OpenAI API with bounded retry logic
+// for transient upstream failures and adaptive max token parameter errors.
 func callOpenAI(ctx context.Context, req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*models.OpenAIResponse, error) {
-	resp, err := callOpenAIInternal(ctx, req, cfg, trace, false)
-	if err != nil {
-		if isUnsupportedMaxTokensParameter(err, req) {
+	currentReq := req
+	adaptedMaxTokens := false
+	var lastErr error
+	attempts := 0
+
+	for attempts < upstreamMaxAttempts {
+		resp, err := callOpenAIInternal(ctx, currentReq, cfg, trace, attempts > 0)
+		attempts++
+		if err == nil {
+			cacheMaxCompletionTokensSupport(currentReq, cfg, false)
+			return resp, nil
+		}
+		lastErr = err
+
+		if !adaptedMaxTokens && isUnsupportedMaxTokensParameter(err, currentReq) {
 			if cfg.Debug {
-				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter for model %s, retrying without it\n", req.Model)
+				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter for model %s, retrying without it\n", currentReq.Model)
 			}
-			return retryWithoutMaxCompletionTokens(ctx, req, cfg, trace)
+			currentReq = requestWithoutMaxTokens(currentReq, cfg)
+			adaptedMaxTokens = true
+			continue
 		}
-		return nil, err
-	}
-
-	// Success on first try - cache that this (provider, model) supports max_completion_tokens
-	// Only cache if we actually sent max_completion_tokens
-	if req.MaxCompletionTokens > 0 {
-		cacheKey := config.CacheKey{
-			BaseURL: cfg.OpenAIBaseURL,
-			Model:   req.Model,
-		}
-		config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{
-			UsesMaxCompletionTokens: true,
-		})
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] Cached: model %s supports max_completion_tokens\n", req.Model)
+		if isContextWindowExceededError(err, cfg) || !isRetryableUpstreamError(err) {
+			return nil, err
 		}
 	}
 
-	return resp, nil
+	return nil, &upstreamRetriesExhaustedError{Attempts: attempts, Err: lastErr}
 }
 
-// callOpenAIStream makes a streaming HTTP request with retry logic for parameter errors.
-// Uses per-model capability caching.
+// callOpenAIStream makes a streaming HTTP request with bounded retry logic before
+// any downstream SSE response body is written.
 func callOpenAIStream(ctx context.Context, req *models.OpenAIRequest, cfg *config.Config, trace *diagnosticsTrace) (*http.Response, error) {
-	resp, err := callOpenAIStreamInternal(ctx, req, cfg, trace, false)
-	if err != nil {
-		if isUnsupportedMaxTokensParameter(err, req) {
+	currentReq := req
+	adaptedMaxTokens := false
+	var lastErr error
+	attempts := 0
+
+	for attempts < upstreamMaxAttempts {
+		resp, err := callOpenAIStreamInternal(ctx, currentReq, cfg, trace, attempts > 0)
+		attempts++
+		if err == nil {
+			cacheMaxCompletionTokensSupport(currentReq, cfg, true)
+			return resp, nil
+		}
+		lastErr = err
+
+		if !adaptedMaxTokens && isUnsupportedMaxTokensParameter(err, currentReq) {
 			if cfg.Debug {
-				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter in stream for model %s, retrying without it\n", req.Model)
+				fmt.Printf("[DEBUG] Detected rejected max_completion_tokens parameter in stream for model %s, retrying without it\n", currentReq.Model)
 			}
-			retryReq := *req
-			retryReq.MaxCompletionTokens = 0
-			retryReq.MaxTokens = 0
-			cacheKey := config.CacheKey{BaseURL: cfg.OpenAIBaseURL, Model: req.Model}
-			config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{UsesMaxCompletionTokens: false})
-			return callOpenAIStreamInternal(ctx, &retryReq, cfg, trace, true)
+			currentReq = requestWithoutMaxTokens(currentReq, cfg)
+			adaptedMaxTokens = true
+			continue
 		}
-		return nil, err
-	}
-
-	// Success - cache capability if we sent max_completion_tokens
-	if req.MaxCompletionTokens > 0 {
-		cacheKey := config.CacheKey{
-			BaseURL: cfg.OpenAIBaseURL,
-			Model:   req.Model,
-		}
-		config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{
-			UsesMaxCompletionTokens: true,
-		})
-		if cfg.Debug {
-			fmt.Printf("[DEBUG] Cached: model %s supports max_completion_tokens (streaming)\n", req.Model)
+		if isContextWindowExceededError(err, cfg) || !isRetryableUpstreamError(err) {
+			return nil, err
 		}
 	}
 
-	return resp, nil
+	return nil, &upstreamRetriesExhaustedError{Attempts: attempts, Err: lastErr}
 }
 
 // callOpenAIStreamInternal makes a streaming HTTP request without retry logic
@@ -732,6 +737,19 @@ func callOpenAIStreamInternal(ctx context.Context, req *models.OpenAIRequest, cf
 	return resp, nil
 }
 
+type upstreamRetriesExhaustedError struct {
+	Attempts int
+	Err      error
+}
+
+func (err *upstreamRetriesExhaustedError) Error() string {
+	return fmt.Sprintf("upstream request failed after %d attempts: %v", err.Attempts, err.Err)
+}
+
+func (err *upstreamRetriesExhaustedError) Unwrap() error {
+	return err.Err
+}
+
 type upstreamStatusError struct {
 	StatusCode int
 	Body       []byte
@@ -757,6 +775,7 @@ type downstreamErrorMapping struct {
 	StreamMessage         string
 	DiagnosticsError      error
 	ContextWindowExceeded bool
+	Retryable             bool
 }
 
 func mapUpstreamErrorForDownstream(err error, cfg *config.Config) downstreamErrorMapping {
@@ -776,7 +795,13 @@ func mapUpstreamErrorForDownstream(err error, cfg *config.Config) downstreamErro
 			StreamMessage:         message,
 			DiagnosticsError:      diagnosticFailure(completionUpstreamError, failureContextWindowExceeded, err),
 			ContextWindowExceeded: true,
+			Retryable:             false,
 		}
+	}
+	retryable := true
+	var exhausted *upstreamRetriesExhaustedError
+	if errors.As(err, &exhausted) {
+		retryable = false
 	}
 	return downstreamErrorMapping{
 		StatusCode: fiber.StatusBadGateway,
@@ -784,12 +809,14 @@ func mapUpstreamErrorForDownstream(err error, cfg *config.Config) downstreamErro
 		Body: fiber.Map{
 			"type": "error",
 			"error": fiber.Map{
-				"type":    "api_error",
-				"message": fmt.Sprintf("OpenAI API error: %v", err),
+				"type":      "api_error",
+				"message":   fmt.Sprintf("OpenAI API error: %v", err),
+				"retryable": retryable,
 			},
 		},
 		StreamMessage:    fmt.Sprintf("streaming request failed: %v", err),
 		DiagnosticsError: err,
+		Retryable:        retryable,
 	}
 }
 
@@ -839,6 +866,50 @@ func collectJSONStrings(value interface{}, fields *[]string) {
 	case string:
 		*fields = append(*fields, typed)
 	}
+}
+
+func requestWithoutMaxTokens(req *models.OpenAIRequest, cfg *config.Config) *models.OpenAIRequest {
+	retryReq := *req
+	retryReq.MaxCompletionTokens = 0
+	retryReq.MaxTokens = 0
+	cacheKey := config.CacheKey{BaseURL: cfg.OpenAIBaseURL, Model: req.Model}
+	config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{UsesMaxCompletionTokens: false})
+	return &retryReq
+}
+
+func cacheMaxCompletionTokensSupport(req *models.OpenAIRequest, cfg *config.Config, streaming bool) {
+	if req.MaxCompletionTokens <= 0 {
+		return
+	}
+	cacheKey := config.CacheKey{BaseURL: cfg.OpenAIBaseURL, Model: req.Model}
+	config.SetModelCapabilities(cacheKey, &config.ModelCapabilities{UsesMaxCompletionTokens: true})
+	if cfg.Debug {
+		if streaming {
+			fmt.Printf("[DEBUG] Cached: model %s supports max_completion_tokens (streaming)\n", req.Model)
+			return
+		}
+		fmt.Printf("[DEBUG] Cached: model %s supports max_completion_tokens\n", req.Model)
+	}
+}
+
+func isRetryableUpstreamError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var statusErr *upstreamStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return false
 }
 
 // isUnsupportedMaxTokensParameter only adapts a model capability after a provider
@@ -1030,7 +1101,7 @@ func errorJSON(err error) string {
 	return string(encoded)
 }
 
-func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, proxyStatus int, contextWindowExceeded bool, err error) {
+func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model string, streaming bool, proxyStatus int, contextWindowExceeded bool, retryable bool, err error) {
 	requestID := ""
 	if trace != nil {
 		requestID = trace.event.RequestID
@@ -1045,7 +1116,7 @@ func logUpstreamFailure(trace *diagnosticsTrace, cfg *config.Config, model strin
 		completionState, failureKind = completionUpstreamError, failureContextWindowExceeded
 	}
 	fmt.Printf("[ERROR] Upstream request failed request_id=%s provider=%s model=%s streaming=%t proxy_status=%d upstream_status=%d completion=%s failure=%s context_window_exceeded=%t retryable=%t\n",
-		requestID, cfg.DetectProvider(), model, streaming, proxyStatus, upstreamStatus, completionState, failureKind, contextWindowExceeded, !contextWindowExceeded)
+		requestID, cfg.DetectProvider(), model, streaming, proxyStatus, upstreamStatus, completionState, failureKind, contextWindowExceeded, retryable)
 }
 
 func handleCountTokens(c *fiber.Ctx, cfg *config.Config) error {

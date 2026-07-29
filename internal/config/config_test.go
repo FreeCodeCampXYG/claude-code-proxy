@@ -266,6 +266,8 @@ func TestProxySettingsConfig(t *testing.T) {
 		t.Fatalf("unexpected proxy config: %#v", cfg)
 	}
 }
+
+func TestModelDefaults(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
 
