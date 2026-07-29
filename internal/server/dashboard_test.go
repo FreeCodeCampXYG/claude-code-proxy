@@ -60,34 +60,39 @@ func TestRootDashboardRejectsRemoteClients(t *testing.T) {
 	}
 }
 
-func TestPlaceholderLocalPages(t *testing.T) {
+func TestPromptsAndPlaygroundPages(t *testing.T) {
 	app := fiber.New()
-	setupPlaceholderUIEndpoints(app)
+	cfg := &config.Config{OpenAIBaseURL: "https://api.openai.com/v1", SonnetModel: "gpt-5.6-terra"}
+	setupPromptsEndpoints(app, cfg)
+	setupPlaygroundEndpoints(app, cfg)
 	baseURL := startLoopbackTestServer(t, app)
 
 	for _, tt := range []struct {
-		path  string
-		title string
+		path     string
+		title    string
+		required string
 	}{
-		{path: "/prompts", title: "Prompt 存档"},
-		{path: "/playground", title: "API 调用台"},
+		{path: "/prompts", title: "Prompt 存档", required: "存档列表"},
+		{path: "/playground", title: "API 调用台", required: "通用对话"},
 	} {
 		t.Run(tt.path, func(t *testing.T) {
 			resp := getLoopbackTest(t, baseURL, tt.path)
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), tt.title) || !strings.Contains(string(body), "window.__localPageToken=") {
-				t.Fatalf("placeholder %s status=%d body=%s", tt.path, resp.StatusCode, body)
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), tt.title) || !strings.Contains(string(body), tt.required) || !strings.Contains(string(body), "window.__localPageToken=") {
+				t.Fatalf("local page %s status=%d body=%s", tt.path, resp.StatusCode, body)
 			}
 		})
 	}
 }
 
-func TestPlaceholderLocalPagesRejectRemoteClients(t *testing.T) {
+func TestPromptsAndPlaygroundPagesRejectRemoteClients(t *testing.T) {
 	for _, path := range []string{"/prompts", "/playground"} {
 		t.Run(path, func(t *testing.T) {
 			app := fiber.New()
-			setupPlaceholderUIEndpoints(app)
+			cfg := &config.Config{OpenAIBaseURL: "https://api.openai.com/v1"}
+			setupPromptsEndpoints(app, cfg)
+			setupPlaygroundEndpoints(app, cfg)
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.RemoteAddr = "203.0.113.7:1234"
 			resp, err := app.Test(req)

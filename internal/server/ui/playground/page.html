@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>API 调用台</title>
+  <style>
+    :root{color-scheme:light;--bg:#f7f8fb;--surface:#fff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--good:#12b886;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}
+    [data-theme="dark"]{color-scheme:dark;--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--good:#51cf66;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1380px;margin:auto;padding:18px}.shell{display:grid;grid-template-columns:230px minmax(0,1fr);gap:16px}.panel,.side{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow)}.side{padding:14px;height:calc(100vh - 36px);position:sticky;top:18px}.panel{padding:16px}h1,h2,h3{margin:0 0 10px}.muted{color:var(--muted)}.tabs{display:grid;gap:8px}.tab{border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:12px;padding:10px;text-align:left;cursor:pointer}.tab[aria-selected="true"]{border-color:var(--accent);box-shadow:0 0 0 2px rgba(66,99,235,.14)}.view[hidden]{display:none}.grid{display:grid;grid-template-columns:1fr 320px;gap:14px}.field{display:grid;gap:6px;margin-bottom:12px}input,textarea,select,button{font:inherit}input,textarea,select{width:100%;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px}textarea{min-height:110px;resize:vertical}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.actions{display:flex;gap:10px;flex-wrap:wrap}.primary{border:0;background:var(--accent);color:#fff;border-radius:10px;padding:9px 14px;cursor:pointer}.ghost{border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:10px;padding:9px 14px;cursor:pointer}.output{white-space:pre-wrap;min-height:220px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px}.badge{display:inline-flex;border:1px solid var(--border);border-radius:999px;background:var(--surface-2);padding:4px 10px;color:var(--muted);margin:0 8px 8px 0}.drop{border:1px dashed var(--border);border-radius:14px;padding:22px;text-align:center;background:var(--surface-2)}.slides{display:grid;gap:10px}.slide{border:1px solid var(--border);background:var(--surface-2);border-radius:12px;padding:12px}@media(max-width:900px){.shell{grid-template-columns:1fr}.side{position:static;height:auto}.grid{grid-template-columns:1fr}.row{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<main>
+  <section class="shell">
+    <aside class="side">
+      <h1>API 调用台</h1>
+      <p class="muted">轻量一次性任务工作台，复用当前上游配置；图片生成使用独立配置。</p>
+      <script>window.__localPageToken=window.__localPageToken||'';</script>
+      <div class="tabs" role="tablist" aria-label="功能模块">
+        <button class="tab" data-view="chat" aria-selected="true">通用对话</button>
+        <button class="tab" data-view="image">图片生成</button>
+        <button class="tab" data-view="ocr">OCR 识图</button>
+        <button class="tab" data-view="ppt">PPT 创作</button>
+        <button class="tab" data-view="templates">任务模板</button>
+      </div>
+      <p><a href="/">返回控制台</a></p>
+    </aside>
+    <section class="panel">
+      <div id="meta" class="muted"></div>
+      <section id="chat" class="view">
+        <h2>通用对话</h2>
+        <div class="grid"><div>
+          <label class="field">System Prompt<textarea id="chatSystem" placeholder="你是一个高效的任务助手，回答要简洁、准确。"></textarea></label>
+          <label class="field">用户输入<textarea id="chatInput" placeholder="输入一次性任务，最多 2 轮。"></textarea></label>
+          <div class="actions"><button class="primary" data-action="chat">流式执行</button><button class="ghost" data-copy="chatOutput">复制结果</button></div>
+          <div id="chatOutput" class="output">等待执行。后端 SSE 接口将继续接入。</div>
+        </div><aside>
+          <label class="field">模型<select id="chatModel"></select></label>
+          <div class="row"><label class="field">Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></label><label class="field">Max Tokens<input id="maxTokens" type="number" min="1" value="2048"></label></div>
+          <span class="badge">最多 2 轮</span><span class="badge">复用主上游</span><span class="badge">离线模型可用</span>
+        </aside></div>
+      </section>
+      <section id="image" class="view" hidden>
+        <h2>图片生成</h2>
+        <label class="field">Prompt<textarea id="imagePrompt" placeholder="描述要生成的图片，例如：赛博朋克风格的城市夜景。"></textarea></label>
+        <div class="row"><label class="field">尺寸<select><option>1024x1024</option><option>1792x1024</option><option>1024x1792</option></select></label><label class="field">模型<input placeholder="IMAGE_MODEL"></label></div>
+        <div class="actions"><button class="primary" data-action="image">生成图片</button></div><div class="output">将接入 IMAGE_API_URL / IMAGE_API_KEY / IMAGE_MODEL。</div>
+      </section>
+      <section id="ocr" class="view" hidden>
+        <h2>OCR 识图</h2><div class="drop">拖拽 / 粘贴 / 选择图片区域（上传接口继续接入）</div>
+        <label class="field">OCR Prompt<textarea>请识别图片中的所有文字，保持原始格式输出。</textarea></label><div class="actions"><button class="primary" data-action="ocr">开始识别</button></div><div class="output">等待上传图片。</div>
+      </section>
+      <section id="ppt" class="view" hidden>
+        <h2>PPT 创作</h2><label class="field">主题 / 大纲<textarea placeholder="输入主题、受众、页数和风格要求。"></textarea></label><label class="field">System Prompt<textarea>你是专业 PPT 策划助手，输出 JSON：标题、每页内容、备注。</textarea></label><div class="actions"><button class="primary" data-action="ppt">生成结构</button><button class="ghost">导出 Markdown</button><button class="ghost">导出 HTML</button></div><div class="slides"><div class="slide"><strong>预览页</strong><p class="muted">生成后在这里显示幻灯片预览。</p></div></div>
+      </section>
+      <section id="templates" class="view" hidden>
+        <h2>自定义任务模板</h2><div class="row"><label class="field">模板名称<input placeholder="例如：周报总结"></label><label class="field">适用模块<select><option>通用对话</option><option>OCR</option><option>PPT</option><option>图片生成</option></select></label></div><label class="field">System Prompt<textarea></textarea></label><label class="field">参数预设<textarea placeholder="JSON 参数预设"></textarea></label><div class="actions"><button class="primary">保存模板</button><button class="ghost">加载模板</button></div><div class="output">模板将存储在 SQLite task_templates 表。</div>
+      </section>
+    </section>
+  </section>
+</main>
+<script>
+const boot=__PLAYGROUND_BOOTSTRAP__;
+const tabs=[...document.querySelectorAll('.tab')];
+function show(id){tabs.forEach(t=>t.setAttribute('aria-selected',String(t.dataset.view===id)));document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==id)}
+tabs.forEach(t=>t.addEventListener('click',()=>show(t.dataset.view)));
+document.getElementById('meta').textContent='Provider: '+(boot.provider||'unknown')+' · Upstream: '+(boot.upstream||'unknown');
+const modelSelect=document.getElementById('chatModel');(boot.models||[]).forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;modelSelect.appendChild(o)});if(!modelSelect.children.length){const o=document.createElement('option');o.textContent='手动输入模型功能待接入';modelSelect.appendChild(o)}
+async function runChat(){
+  const output=document.getElementById('chatOutput');
+  output.textContent='';
+  const body={model:modelSelect.value,system:document.getElementById('chatSystem').value,prompt:document.getElementById('chatInput').value,temperature:Number(document.getElementById('temperature').value),max_tokens:Number(document.getElementById('maxTokens').value)};
+  try{
+    const response=await fetch('/playground/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-Playground-Token':window.__localPageToken},body:JSON.stringify(body)});
+    if(!response.ok){output.textContent='请求失败：HTTP '+response.status;return;}
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
+    while(true){
+      const read=await reader.read();
+      if(read.done)break;
+      buffer+=decoder.decode(read.value,{stream:true});
+      const lines=buffer.split('\n');buffer=lines.pop()||'';
+      for(const line of lines){
+        if(!line.startsWith('data:'))continue;
+        const data=line.slice(5).trim();
+        if(!data||data==='[DONE]')continue;
+        try{
+          const chunk=JSON.parse(data),choice=(chunk.choices||[])[0]||{},delta=choice.delta||{};
+          if(delta.reasoning_content) output.textContent+='[思考] '+delta.reasoning_content;
+          if(delta.content) output.textContent+=delta.content;
+        }catch(err){/* ignore malformed partial lines */}
+      }
+    }
+    if(!output.textContent)output.textContent='流结束，但没有收到文本内容。';
+  }catch(err){output.textContent='请求失败：'+err.message;}
+}
+document.querySelectorAll('[data-action]').forEach(btn=>btn.addEventListener('click',()=>{if(btn.dataset.action==='chat')runChat();else alert('后端接口正在接入：'+btn.dataset.action)}));
+document.querySelectorAll('[data-copy]').forEach(btn=>btn.addEventListener('click',async()=>{const el=document.getElementById(btn.dataset.copy);if(el&&navigator.clipboard)await navigator.clipboard.writeText(el.textContent)}));
+</script>
+</body>
+</html>

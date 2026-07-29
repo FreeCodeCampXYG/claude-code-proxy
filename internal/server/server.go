@@ -97,7 +97,8 @@ func Start(cfg *config.Config) error {
 	setupDashboardEndpoints(app, cfg, diagnosticsStore)
 	setupMonitorEndpoints(app, cfg, stats)
 	setupProxySettingsEndpoints(app, cfg)
-	setupPlaceholderUIEndpoints(app)
+	setupPromptsEndpoints(app, cfg)
+	setupPlaygroundEndpoints(app, cfg)
 
 	// Claude API endpoints
 	setupClaudeEndpointsWithMonitor(app, cfg, diagnosticsStore, stats)
