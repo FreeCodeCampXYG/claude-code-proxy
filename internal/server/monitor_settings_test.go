@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -33,8 +34,32 @@ func TestMonitorRoutesRequireLoopbackAndExposeSnapshot(t *testing.T) {
 	pageResp := getLoopbackTest(t, baseURL, "/monitor")
 	pageBody, _ := io.ReadAll(pageResp.Body)
 	pageResp.Body.Close()
-	if pageResp.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "流量监控") || !strings.Contains(string(pageBody), "window.__localPageToken=") {
-		t.Fatalf("unexpected monitor page: status=%d body=%s", pageResp.StatusCode, pageBody)
+	pageText := string(pageBody)
+	for _, fragment := range []string{"流量监控", "window.__localPageToken=", "/monitor/snapshot", "X-Monitor-Token", "setInterval", "lastUpdated"} {
+		if !strings.Contains(pageText, fragment) {
+			t.Fatalf("monitor page missing %q: %s", fragment, pageBody)
+		}
+	}
+	if pageResp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected monitor page status=%d body=%s", pageResp.StatusCode, pageBody)
+	}
+
+	tokenMatch := regexp.MustCompile(`window\.__localPageToken="([^"]+)";`).FindStringSubmatch(pageText)
+	if len(tokenMatch) != 2 {
+		t.Fatalf("monitor page did not inject token: %s", pageBody)
+	}
+	snapshotReq, err := http.NewRequest(http.MethodGet, baseURL+"/monitor/snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotReq.Header.Set("X-Monitor-Token", tokenMatch[1])
+	snapshotResp, err := http.DefaultClient.Do(snapshotReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotResp.Body.Close()
+	if snapshotResp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated snapshot status=%d, want 200", snapshotResp.StatusCode)
 	}
 
 	tokenResp := getLoopbackTest(t, baseURL, "/monitor/snapshot")

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>__LOCAL_PAGE_TITLE__</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f8fb;--surface:#ffffff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--shadow:0 12px 32px rgba(15,23,42,.08)}
+    @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--shadow:0 12px 32px rgba(0,0,0,.28)}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:880px;margin:auto;padding:24px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:20px;box-shadow:var(--shadow)}.muted{color:var(--muted)}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.badge{display:inline-block;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:4px 10px;margin-bottom:12px}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <span class="badge">本机页面</span>
+      <h1>__LOCAL_PAGE_TITLE__</h1>
+      <p class="muted">__LOCAL_PAGE_DESC__</p>
+      <p><a href="/">返回控制台</a></p>
+      <script>window.__localPageToken=window.__localPageToken||'';</script>
+    </section>
+  </main>
+</body>
+</html>

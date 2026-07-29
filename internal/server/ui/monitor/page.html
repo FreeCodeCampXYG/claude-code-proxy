@@ -5,42 +5,80 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>流量监控</title>
   <style>
-    :root{color-scheme:light dark;--bg:#0b1220;--panel:#111827;--line:#243247;--text:#e5eefb;--muted:#94a3b8;--accent:#60a5fa}
+    :root{color-scheme:light dark;--bg:#f7f8fb;--panel:#ffffff;--card:#eef2f7;--line:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}
+    @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--panel:#171e2e;--card:#202a3d;--line:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}
-    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:16px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#0f172a;border:1px solid var(--line);border-radius:12px;padding:14px}.card strong{display:block;font-size:1.1rem}.muted{color:var(--muted)}pre{margin:0;white-space:pre-wrap;overflow:auto}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:16px;box-shadow:var(--shadow)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.card strong{display:block;font-size:1.1rem}.muted{color:var(--muted)}.status{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.warn{color:var(--warn)}pre{margin:0;white-space:pre-wrap;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
   </style>
 </head>
 <body>
   <main>
     <section class="panel">
       <h1>流量监控</h1>
-      <p class="muted">实时监控骨架已接入。后续会继续补 SSE、趋势图、活跃连接与日志流。</p>
+      <p class="muted">自动刷新当前请求、成功率、失败数与活跃连接；刷新失败时保留上一次有效快照。</p>
+      <div class="status"><span id="refreshStatus" class="muted">等待刷新</span><span id="lastUpdated" class="muted">尚未刷新</span></div>
       <script>window.__localPageToken=window.__localPageToken||'';</script>
     </section>
     <section class="panel cards" id="cards"></section>
     <section class="panel">
-      <h2>启动快照</h2>
+      <h2>当前快照</h2>
       <pre id="snapshot">__MONITOR_BOOTSTRAP__</pre>
     </section>
   </main>
   <script>
     const boot = JSON.parse(document.getElementById('snapshot').textContent);
     const cards = document.getElementById('cards');
-    const totals = boot.snapshot ? boot.snapshot.totals || {} : {};
-    const items = [
-      ['Provider', boot.provider || 'unknown'],
-      ['Upstream', boot.upstream || 'unknown'],
-      ['请求总数', totals.requests || 0],
-      ['成功', totals.success || 0],
-      ['失败', totals.failure || 0],
-      ['活跃连接', totals.active_requests || 0]
+    const snapshotEl = document.getElementById('snapshot');
+    const statusEl = document.getElementById('refreshStatus');
+    const lastUpdatedEl = document.getElementById('lastUpdated');
+    const cardNodes = new Map();
+    const labels = [
+      ['provider','Provider'],
+      ['upstream','Upstream'],
+      ['requests','请求总数'],
+      ['success','成功'],
+      ['failure','失败'],
+      ['active_requests','活跃连接']
     ];
-    for (const [label, value] of items) {
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML = '<span class="muted">' + label + '</span><strong>' + value + '</strong>';
-      cards.appendChild(card);
+    function valueFor(data,key){
+      const totals = data.snapshot ? data.snapshot.totals || {} : {};
+      if(key==='provider') return data.provider || boot.provider || 'unknown';
+      if(key==='upstream') return data.upstream || boot.upstream || 'unknown';
+      return totals[key] || 0;
     }
+    function render(data){
+      for(const [key,label] of labels){
+        let card=cardNodes.get(key);
+        if(!card){
+          card=document.createElement('div');
+          card.className='card';
+          card.innerHTML='<span class="muted"></span><strong></strong>';
+          card.querySelector('span').textContent=label;
+          cards.appendChild(card);
+          cardNodes.set(key,card);
+        }
+        card.querySelector('strong').textContent=valueFor(data,key);
+      }
+      snapshotEl.textContent=JSON.stringify(data,null,2);
+    }
+    async function refreshSnapshot(){
+      if(document.hidden) return;
+      try{
+        const response=await fetch('/monitor/snapshot',{headers:{'X-Monitor-Token':window.__localPageToken}});
+        if(!response.ok) throw new Error('HTTP '+response.status);
+        const snapshot=await response.json();
+        render({provider:boot.provider,upstream:boot.upstream,snapshot});
+        statusEl.textContent='自动刷新中（5 秒）';
+        statusEl.className='muted';
+        lastUpdatedEl.textContent='最后更新：'+new Date().toLocaleTimeString();
+      }catch(err){
+        statusEl.textContent='刷新失败：'+err.message;
+        statusEl.className='warn';
+      }
+    }
+    render(boot);
+    refreshSnapshot();
+    setInterval(refreshSnapshot,5000);
   </script>
 </body>
 </html>

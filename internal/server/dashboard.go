@@ -78,7 +78,7 @@ func dashboardHTML(cfg *config.Config, diagnosticsEnabled bool) string {
 	}
 	cardsHTML := ""
 	for _, card := range cards {
-		cardsHTML += fmt.Sprintf(`<a class="card" href="%s"><strong>%s</strong><span>%s</span></a>`, card.Href, card.Title, card.Desc)
+		cardsHTML += fmt.Sprintf(`<a class="card" href="%s" target="_blank" rel="noopener noreferrer"><strong>%s</strong><span>%s</span></a>`, card.Href, card.Title, card.Desc)
 	}
 	statusJSON := rootStatusPayload(cfg, diagnosticsEnabled)
 	statusText := fmt.Sprintf("版本：%s · 上游：%s · 路由：%s", ProxyVersion, safeBaseURL(cfg.OpenAIBaseURL), getRoutingMode(cfg))

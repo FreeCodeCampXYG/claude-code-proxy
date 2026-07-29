@@ -1,24 +1,37 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Claude Code Proxy 控制台</title>
   <style>
-    :root{color-scheme:light dark;--bg:#0f172a;--panel:#111827;--muted:#94a3b8;--text:#e5eefb;--line:#243247;--accent:#60a5fa;--soft:#172033}
-    *{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:linear-gradient(180deg,#0b1220,#111827);color:var(--text)}
-    main{max-width:1200px;margin:auto;padding:24px}.hero,.panel{background:rgba(17,24,39,.92);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 18px 40px rgba(0,0,0,.18)}
-    h1,h2{margin:0 0 10px}.muted{color:var(--muted)}.hero{margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
-    .card{display:block;text-decoration:none;color:inherit;background:var(--soft);border:1px solid var(--line);border-radius:16px;padding:16px;min-height:122px}
-    .card:hover{border-color:var(--accent);transform:translateY(-1px)}.card strong{display:block;font-size:1.05rem;margin-bottom:8px}
-    pre{margin:0;white-space:pre-wrap;overflow:auto;background:#0b1220;border-radius:12px;padding:14px;border:1px solid var(--line)}
+    :root{color-scheme:light;--bg:#f7f8fb;--surface:#ffffff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--accent-2:#12b886;--shadow:0 12px 32px rgba(15,23,42,.08)}
+    [data-theme="dark"]{color-scheme:dark;--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--accent-2:#51cf66;--shadow:0 12px 32px rgba(0,0,0,.28)}
+    *{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:radial-gradient(circle at top left,rgba(66,99,235,.12),transparent 32rem),var(--bg);color:var(--text)}
+    main{max-width:1200px;margin:auto;padding:24px}.hero,.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;box-shadow:var(--shadow)}
+    .hero{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}.hero-text{min-width:0}h1,h2{margin:0 0 10px}.muted{color:var(--muted)}
+    .theme-switcher{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.theme-switcher label{font-size:.85rem;color:var(--muted)}select{border:1px solid var(--border);border-radius:999px;background:var(--surface-2);color:var(--text);padding:7px 10px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.card{display:block;text-decoration:none;color:inherit;background:var(--surface-2);border:1px solid var(--border);border-radius:16px;padding:16px;min-height:122px;transition:border-color .15s,transform .15s,box-shadow .15s}
+    .card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 10px 24px rgba(66,99,235,.12)}.card strong{display:block;font-size:1.05rem;margin-bottom:8px}.card span{color:var(--muted)}
+    pre{margin:0;white-space:pre-wrap;overflow:auto;background:var(--surface-2);color:var(--text);border-radius:12px;padding:14px;border:1px solid var(--border)}
+    @media(max-width:640px){main{padding:14px}.hero{display:block}.theme-switcher{margin-top:12px}}
   </style>
 </head>
 <body>
   <main>
     <section class="hero">
-      <h1>__DASHBOARD_TITLE__</h1>
-      <p class="muted">__DASHBOARD_STATUS__</p>
+      <div class="hero-text">
+        <h1>__DASHBOARD_TITLE__</h1>
+        <p class="muted">__DASHBOARD_STATUS__</p>
+      </div>
+      <div class="theme-switcher">
+        <label for="themeSelect">界面风格</label>
+        <select id="themeSelect" aria-label="界面风格">
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+          <option value="system">跟随系统</option>
+        </select>
+      </div>
       <script>window.__localPageToken=window.__localPageToken||'';</script>
     </section>
     <section class="panel" style="margin-bottom:18px">
@@ -30,5 +43,21 @@
       <pre id="statusJson">__DASHBOARD_JSON__</pre>
     </section>
   </main>
+  <script>
+    (function(){
+      const key='ccp-dashboard-theme';
+      const select=document.getElementById('themeSelect');
+      const media=window.matchMedia('(prefers-color-scheme: dark)');
+      function apply(value){
+        const chosen=value||localStorage.getItem(key)||'light';
+        const resolved=chosen==='system'?(media.matches?'dark':'light'):chosen;
+        document.documentElement.dataset.theme=resolved;
+        select.value=chosen;
+      }
+      select.addEventListener('change',function(){localStorage.setItem(key,select.value);apply(select.value);});
+      media.addEventListener&&media.addEventListener('change',function(){if((localStorage.getItem(key)||'light')==='system')apply('system');});
+      apply();
+    })();
+  </script>
 </body>
 </html>
