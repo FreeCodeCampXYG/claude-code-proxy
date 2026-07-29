@@ -86,9 +86,10 @@ func TestStoreInsertBundleRollsBackEventWhenContentInsertFails(t *testing.T) {
 func TestStoreInsertBundleRecoversAfterForeignKeyFailure(t *testing.T) {
 	store := openTestStore(t, StoreOptions{CaptureContent: true})
 	if _, err := store.db.Exec(`CREATE TRIGGER orphan_diagnostics_content
-		AFTER INSERT ON diagnostics_content
+		AFTER INSERT ON diagnostics_events
 		BEGIN
-			DELETE FROM diagnostics_events WHERE request_id = NEW.request_id;
+			INSERT INTO diagnostics_content(request_id, attempt_number, boundary, created_at, expires_at, capture_mode, content)
+			VALUES ('wrong-request', 0, 'claude_request', 1, 2, 'full', X'7B7D');
 		END;`); err != nil {
 		t.Fatal(err)
 	}
