@@ -19,6 +19,7 @@ import (
 	"github.com/claude-code-proxy/proxy/internal/daemon"
 	"github.com/claude-code-proxy/proxy/internal/diagnostics"
 	"github.com/claude-code-proxy/proxy/internal/monitor"
+	"github.com/claude-code-proxy/proxy/internal/promptarchive"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -31,6 +32,7 @@ var ProxyVersion = "dev"
 // Start initializes and starts the HTTP server
 func Start(cfg *config.Config) error {
 	var diagnosticsStore *diagnostics.Store
+	var promptStore *promptarchive.Store
 	stats := monitor.NewStats(200)
 	if cfg.DiagnosticsEnabled {
 		var err error
@@ -52,6 +54,18 @@ func Start(cfg *config.Config) error {
 		if _, err := diagnosticsStore.Cleanup(context.Background()); err != nil {
 			fmt.Printf("[WARN] Diagnostics cleanup failed: %v\n", err)
 		}
+	}
+	if cfg.PromptArchiveEnabled {
+		var err error
+		promptStore, err = promptarchive.Open(cfg.PromptArchiveDBPath, promptarchive.Options{Retention: cfg.PromptArchiveRetention, BusyTimeout: cfg.DiagnosticsBusyTimeout})
+		if err != nil {
+			return fmt.Errorf("initialize prompt archive store: %w", err)
+		}
+		defer func() {
+			if err := promptStore.Close(); err != nil {
+				fmt.Printf("[WARN] Failed to close prompt archive store: %v\n", err)
+			}
+		}()
 	}
 
 	app := fiber.New(fiber.Config{
@@ -97,11 +111,11 @@ func Start(cfg *config.Config) error {
 	setupDashboardEndpoints(app, cfg, diagnosticsStore)
 	setupMonitorEndpoints(app, cfg, stats)
 	setupProxySettingsEndpoints(app, cfg)
-	setupPromptsEndpoints(app, cfg)
+	setupPromptsEndpoints(app, cfg, diagnosticsStore, promptStore)
 	setupPlaygroundEndpoints(app, cfg)
 
 	// Claude API endpoints
-	setupClaudeEndpointsWithMonitor(app, cfg, diagnosticsStore, stats)
+	setupClaudeEndpointsWithMonitor(app, cfg, diagnosticsStore, stats, promptStore)
 	setupDiagnosticsEndpoints(app, diagnosticsStore, cfg)
 
 	// Graceful shutdown
@@ -126,6 +140,11 @@ func Start(cfg *config.Config) error {
 		} else {
 			fmt.Println("   Diagnostics content capture: disabled (redacted diagnostics only)")
 		}
+	}
+
+	if cfg.PromptArchiveEnabled {
+		fmt.Printf("   Prompt archive: http://127.0.0.1:%s/prompts\n", cfg.Port)
+		fmt.Printf("   Prompt archive DB: %s (retention %s)\n", cfg.PromptArchiveDBPath, cfg.PromptArchiveRetention)
 	}
 
 	if cfg.PassthroughMode {
@@ -181,13 +200,13 @@ func getHaikuModel(cfg *config.Config) string {
 }
 
 func setupClaudeEndpoints(app *fiber.App, cfg *config.Config, store *diagnostics.Store) {
-	setupClaudeEndpointsWithMonitor(app, cfg, store, nil)
+	setupClaudeEndpointsWithMonitor(app, cfg, store, nil, nil)
 }
 
-func setupClaudeEndpointsWithMonitor(app *fiber.App, cfg *config.Config, store *diagnostics.Store, stats *monitor.Stats) {
+func setupClaudeEndpointsWithMonitor(app *fiber.App, cfg *config.Config, store *diagnostics.Store, stats *monitor.Stats, promptStore *promptarchive.Store) {
 	// Messages endpoint - main Claude API
 	app.Post("/v1/messages", func(c *fiber.Ctx) error {
-		return handleMessages(c, cfg, store, stats)
+		return handleMessages(c, cfg, store, stats, promptStore)
 	})
 
 	// Token counting endpoint

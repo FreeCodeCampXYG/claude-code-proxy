@@ -63,7 +63,7 @@ func TestRootDashboardRejectsRemoteClients(t *testing.T) {
 func TestPromptsAndPlaygroundPages(t *testing.T) {
 	app := fiber.New()
 	cfg := &config.Config{OpenAIBaseURL: "https://api.openai.com/v1", SonnetModel: "gpt-5.6-terra"}
-	setupPromptsEndpoints(app, cfg)
+	setupPromptsEndpoints(app, cfg, nil, nil)
 	setupPlaygroundEndpoints(app, cfg)
 	baseURL := startLoopbackTestServer(t, app)
 
@@ -91,7 +91,7 @@ func TestPromptsAndPlaygroundPagesRejectRemoteClients(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			app := fiber.New()
 			cfg := &config.Config{OpenAIBaseURL: "https://api.openai.com/v1"}
-			setupPromptsEndpoints(app, cfg)
+			setupPromptsEndpoints(app, cfg, nil, nil)
 			setupPlaygroundEndpoints(app, cfg)
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.RemoteAddr = "203.0.113.7:1234"

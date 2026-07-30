@@ -101,6 +101,11 @@ type Config struct {
 	DiagnosticsBusyTimeout      time.Duration
 	DiagnosticsCloseTimeout     time.Duration
 
+	// Prompt archive storage
+	PromptArchiveEnabled   bool
+	PromptArchiveDBPath    string
+	PromptArchiveRetention time.Duration
+
 	// Model routing (pattern-based if not set)
 	OpusModel   string
 	SonnetModel string
@@ -204,6 +209,11 @@ func Load() (*Config, error) {
 		DiagnosticsBusyTimeout:      getEnvAsDurationOrDefault("DIAGNOSTICS_BUSY_TIMEOUT", DefaultDiagnosticsBusyTimeout),
 		DiagnosticsCloseTimeout:     getEnvAsDurationOrDefault("DIAGNOSTICS_CLOSE_TIMEOUT", DefaultDiagnosticsCloseTimeout),
 
+		// Prompt archive storage
+		PromptArchiveEnabled:   getEnvAsBoolOrDefault("PROMPT_ARCHIVE_ENABLED", false),
+		PromptArchiveDBPath:    os.Getenv("PROMPT_ARCHIVE_DB_PATH"),
+		PromptArchiveRetention: getEnvAsDurationOrDefault("PROMPT_ARCHIVE_RETENTION", 168*time.Hour),
+
 		// Pattern-based routing (optional overrides)
 		OpusModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),
 		SonnetModel: getEnvOrDefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"),
@@ -258,6 +268,9 @@ func Load() (*Config, error) {
 	if cfg.DiagnosticsBusyTimeout <= 0 {
 		return nil, fmt.Errorf("DIAGNOSTICS_BUSY_TIMEOUT must be a positive Go duration")
 	}
+	if cfg.PromptArchiveEnabled && cfg.PromptArchiveRetention <= 0 {
+		return nil, fmt.Errorf("PROMPT_ARCHIVE_RETENTION must be a positive Go duration")
+	}
 	if cfg.ContextWindowPatternsMode != "append" && cfg.ContextWindowPatternsMode != "override" {
 		return nil, fmt.Errorf("CONTEXT_WINDOW_ERROR_PATTERNS_MODE must be append or override")
 	}
@@ -274,6 +287,15 @@ func Load() (*Config, error) {
 			cfg.DiagnosticsDBPath = filepath.Join(homeDir, ".claude", "proxy-diagnostics.db")
 		} else {
 			return nil, fmt.Errorf("DIAGNOSTICS_DB_PATH is required when diagnostics are enabled and no user directory is available")
+		}
+	}
+	if cfg.PromptArchiveEnabled && strings.TrimSpace(cfg.PromptArchiveDBPath) == "" {
+		if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" {
+			cfg.PromptArchiveDBPath = filepath.Join(cacheDir, "claude-code-proxy", "prompt_archive.db")
+		} else if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+			cfg.PromptArchiveDBPath = filepath.Join(homeDir, ".claude", "proxy-prompt-archive.db")
+		} else {
+			return nil, fmt.Errorf("PROMPT_ARCHIVE_DB_PATH is required when prompt archive is enabled and no user directory is available")
 		}
 	}
 

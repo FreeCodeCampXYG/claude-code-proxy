@@ -5,30 +5,62 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Prompt 存档</title>
   <style>
-    :root{color-scheme:light dark;--bg:#f7f8fb;--surface:#fff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--shadow:0 12px 32px rgba(15,23,42,.08)}@media(prefers-color-scheme:dark){:root{--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--shadow:0 12px 32px rgba(0,0,0,.28)}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}.toolbar{display:flex;gap:10px;flex-wrap:wrap}.field{display:grid;gap:6px}input,select,button{font:inherit;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px}.primary{background:var(--accent);border-color:var(--accent);color:white}.muted{color:var(--muted)}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left}pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px}
+    :root{color-scheme:light dark;--bg:#f7f8fb;--surface:#fff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}@media(prefers-color-scheme:dark){:root{--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:grid;gap:6px}input,select,button{font:inherit;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px}.primary{background:var(--accent);border-color:var(--accent);color:white}.muted{color:var(--muted)}.warn{color:var(--warn)}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left;vertical-align:top}tr[data-id]{cursor:pointer}tr[data-id]:hover{background:var(--surface-2)}pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px;overflow:auto}
   </style>
 </head>
 <body>
 <main>
   <section class="panel">
     <h1>Prompt 存档</h1>
-    <p class="muted">默认关闭，开启 PROMPT_ARCHIVE_ENABLED 后保存经过代理的 Claude 请求摘要与脱敏详情。</p>
+    <p class="muted">开启 <strong>PROMPT_ARCHIVE_ENABLED=true</strong> 后独立保存经过代理的 Claude 请求摘要与脱敏详情；未开启时只回退展示诊断元数据。</p>
+    <p id="archiveState" class="muted">正在读取状态...</p>
     <script>window.__localPageToken=window.__localPageToken||'';</script>
   </section>
   <section class="panel toolbar">
-    <label class="field">关键词<input placeholder="搜索首条用户消息 / 模型 / request id"></label>
-    <label class="field">模型<select><option>全部模型</option></select></label>
-    <label class="field">时间<select><option>最近 24 小时</option><option>最近 7 天</option></select></label>
-    <button class="primary">搜索</button><button>导出 JSON</button><button>导出 Markdown</button>
+    <label class="field">关键词<input id="keyword" placeholder="搜索模型 / request id / 摘要"></label>
+    <label class="field">模型<input id="model" placeholder="全部模型"></label>
+    <label class="field">时间<select id="range"><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option><option value="all">全部</option></select></label>
+    <button class="primary" id="searchBtn">搜索</button><button id="exportJson">导出 JSON</button><button id="exportMarkdown">导出 Markdown</button>
   </section>
   <section class="panel">
     <h2>存档列表</h2>
-    <table><thead><tr><th>时间</th><th>模型</th><th>消息数</th><th>摘要</th><th>状态</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="muted">存储接口正在接入；当前仅提供页面与安全路由骨架。</td></tr></tbody></table>
+    <table><thead><tr><th>时间</th><th>模型</th><th>消息数</th><th>摘要</th><th>状态</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="muted">正在加载...</td></tr></tbody></table>
   </section>
   <section class="panel">
     <h2>详情预览</h2>
     <pre id="status">__PROMPTS_BOOTSTRAP__</pre>
   </section>
 </main>
+<script>
+const boot=__PROMPTS_BOOTSTRAP__;
+const rows=document.getElementById('rows'),statusEl=document.getElementById('status'),stateEl=document.getElementById('archiveState');
+let lastRecords=[];
+function setState(){stateEl.textContent=boot.enabled?'已开启：读取诊断数据库中的请求摘要，保留期 '+boot.retention:'未开启：请用 -d 或 DIAGNOSTICS_ENABLED=true 重启代理；开启后只会记录新的请求。';stateEl.className=boot.enabled?'muted':'warn'}
+function escapeHtml(value){return String(value||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function sinceForRange(){const value=document.getElementById('range').value;if(value==='all')return '';const d=new Date();d.setHours(d.getHours()-(value==='7d'?168:24));return d.toISOString()}
+async function loadRecords(){
+  const params=new URLSearchParams({limit:'100'}),q=document.getElementById('keyword').value.trim(),model=document.getElementById('model').value.trim(),since=sinceForRange();
+  if(q)params.set('q',q);if(model)params.set('model',model);if(since)params.set('since',since);else params.set('range','all');
+  rows.innerHTML='<tr><td colspan="5" class="muted">查询中...</td></tr>';
+  try{
+    const res=await fetch('/prompts/records?'+params,{headers:{'X-Prompts-Token':window.__localPageToken}});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.error||('HTTP '+res.status));
+    lastRecords=data.records||[];
+    if(!data.enabled){rows.innerHTML='<tr><td colspan="5" class="warn">'+escapeHtml(data.message||'Prompt 存档未开启')+'</td></tr>';return;}
+    if(!lastRecords.length){rows.innerHTML='<tr><td colspan="5" class="muted">没有查到记录。请确认已开启诊断，并在开启后产生新的 Claude 请求；当前筛选条件也可能过窄。</td></tr>';return;}
+    rows.innerHTML=lastRecords.map(r=>'<tr data-id="'+escapeHtml(r.request_id)+'"><td>'+new Date(r.created_at).toLocaleString()+'</td><td>'+escapeHtml(r.model||r.incoming_model||'unknown')+'</td><td>'+r.message_count+'</td><td>'+escapeHtml(r.summary)+'</td><td>'+escapeHtml(r.status)+'</td></tr>').join('');
+  }catch(err){rows.innerHTML='<tr><td colspan="5" class="warn">查询失败：'+escapeHtml(err.message)+'</td></tr>';}
+}
+async function loadDetail(id){
+  try{const res=await fetch('/prompts/'+encodeURIComponent(id),{headers:{'X-Prompts-Token':window.__localPageToken}});const data=await res.json();if(!res.ok)throw new Error(data.error||('HTTP '+res.status));statusEl.textContent=JSON.stringify(data,null,2);}catch(err){statusEl.textContent='详情读取失败：'+err.message;}
+}
+function download(name,type,text){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+document.getElementById('searchBtn').addEventListener('click',loadRecords);
+rows.addEventListener('click',e=>{const tr=e.target.closest('tr[data-id]');if(tr)loadDetail(tr.dataset.id)});
+document.getElementById('exportJson').addEventListener('click',()=>download('prompts.json','application/json',JSON.stringify(lastRecords,null,2)));
+document.getElementById('exportMarkdown').addEventListener('click',()=>download('prompts.md','text/markdown',lastRecords.map(r=>'## '+r.request_id+'\n- 时间：'+r.created_at+'\n- 模型：'+(r.model||'')+'\n- 摘要：'+r.summary+'\n- 状态：'+r.status).join('\n\n')));
+setState();loadRecords();
+</script>
 </body>
 </html>
