@@ -275,6 +275,11 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 - `OPENROUTER_APP_NAME` - App name for OpenRouter dashboard tracking
 - `OPENROUTER_APP_URL` - App URL for better rate limits (higher quotas)
 
+**Optional - Playground Features:**
+- `OCR_MODEL` - Optional vision-capable Chat Completions model for Playground OCR; uploaded JPEG/PNG/WebP image bytes are sent upstream for that request and are not persisted by the proxy
+- `PPT_MODEL` - Optional Chat Completions model override for validated Playground PPT outlines
+- `IMAGE_API_URL`, `IMAGE_API_KEY`, `IMAGE_MODEL` - Required together to enable independent Playground image generation; the dedicated image key never falls back to `OPENAI_API_KEY`
+
 **Optional - Diagnostics:**
 - `DIAGNOSTICS_ENABLED` - Enable local redacted SQLite diagnostics (`true`, `1`, or `yes`; default: `false`)
 - `DIAGNOSTICS_CAPTURE_CONTENT` - Explicitly retain bounded local sent/received payload snapshots (default: `false`; requires `DIAGNOSTICS_ENABLED=true`)
@@ -313,9 +318,9 @@ The proxy now ships with loopback-only browser pages:
 The Playground page is structured for long-term expansion:
 
 - **Chat**: streaming response, stop generation, reasoning/text split, manual model entry
-- **Image workflow**: multi-prompt input, multi-image placeholders, A→B model chain, canvas preview, local edit hooks
-- **OCR**: base multi-modal task endpoint, ready for future direct image upload
-- **PPT**: structured slide generation and preview placeholder
+- **Image workflow**: optional independent image API with bounded local previews (requires `IMAGE_API_URL`, `IMAGE_API_KEY`, and `IMAGE_MODEL`; never falls back to the chat key)
+- **OCR**: JPEG/PNG/WebP upload to a configured vision-capable chat model (`OCR_MODEL` optional); image bytes are not persisted by the proxy
+- **PPT**: validated `ppt-outline/v1` deck preview plus Markdown/HTML export (no `.pptx` export)
 - **Providers / Keys**: UI scaffold for multiple providers, base URLs, and key labels
 - **Templates**: persisted task presets with workflow metadata
 

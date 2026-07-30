@@ -5,80 +5,31 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>流量监控</title>
   <style>
-    :root{color-scheme:light dark;--bg:#f7f8fb;--panel:#ffffff;--card:#eef2f7;--line:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}
-    @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--panel:#171e2e;--card:#202a3d;--line:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}
-    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:16px;box-shadow:var(--shadow)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.card strong{display:block;font-size:1.1rem}.muted{color:var(--muted)}.status{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.warn{color:var(--warn)}pre{margin:0;white-space:pre-wrap;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+    :root{color-scheme:light dark;--bg:#f7f8fb;--panel:#fff;--card:#eef2f7;--line:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--warn:#b65f00;--shadow:0 12px 32px rgba(15,23,42,.08)}
+    @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--panel:#171e2e;--card:#202a3d;--line:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#9ab0ff;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}h1,h2{margin:0 0 8px}h2{font-size:1.05rem}.muted{color:var(--muted)}.status{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.warn{color:var(--warn)}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.card strong{display:block;margin-top:3px;font-size:1.28rem}.card .detail{display:block;margin-top:4px;color:var(--muted);font-size:.85rem}.notice{border-left:4px solid var(--accent)}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;white-space:nowrap}td{word-break:break-word}.empty{text-align:center;color:var(--muted)}
   </style>
 </head>
 <body>
   <main>
     <section class="panel">
       <h1>流量监控</h1>
-      <p class="muted">自动刷新当前请求、成功率、失败数与活跃连接；刷新失败时保留上一次有效快照。</p>
+      <p class="muted">自动刷新请求统计与最近事件；刷新失败时保留上一次有效快照。</p>
       <div class="status"><span id="refreshStatus" class="muted">等待刷新</span><span id="lastUpdated" class="muted">尚未刷新</span></div>
       <script>window.__localPageToken=window.__localPageToken||'';</script>
     </section>
-    <section class="panel cards" id="cards"></section>
-    <section class="panel">
-      <h2>当前快照</h2>
-      <pre id="snapshot">__MONITOR_BOOTSTRAP__</pre>
-    </section>
+    <section class="cards" id="summaryCards" aria-label="请求统计"></section>
+    <section class="panel notice"><strong>进程内存统计</strong><p class="muted">这些数据只保存在代理进程内存中，不会持久化。代理重启或统计被重置后，累计值和最近事件会从零开始。</p></section>
+    <section class="panel"><h2>最近事件</h2><p class="muted">按发生时间从新到旧显示。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>结果</th><th>模型 / Provider</th><th>类型</th><th>Tokens</th><th>耗时</th><th>状态</th></tr></thead><tbody id="recentEvents"></tbody></table></div></section>
+    <pre id="bootstrap" hidden>__MONITOR_BOOTSTRAP__</pre>
   </main>
   <script>
-    const boot = JSON.parse(document.getElementById('snapshot').textContent);
-    const cards = document.getElementById('cards');
-    const snapshotEl = document.getElementById('snapshot');
-    const statusEl = document.getElementById('refreshStatus');
-    const lastUpdatedEl = document.getElementById('lastUpdated');
-    const cardNodes = new Map();
-    const labels = [
-      ['provider','Provider'],
-      ['upstream','Upstream'],
-      ['requests','请求总数'],
-      ['success','成功'],
-      ['failure','失败'],
-      ['active_requests','活跃连接']
-    ];
-    function valueFor(data,key){
-      const totals = data.snapshot ? data.snapshot.totals || {} : {};
-      if(key==='provider') return data.provider || boot.provider || 'unknown';
-      if(key==='upstream') return data.upstream || boot.upstream || 'unknown';
-      return totals[key] || 0;
-    }
-    function render(data){
-      for(const [key,label] of labels){
-        let card=cardNodes.get(key);
-        if(!card){
-          card=document.createElement('div');
-          card.className='card';
-          card.innerHTML='<span class="muted"></span><strong></strong>';
-          card.querySelector('span').textContent=label;
-          cards.appendChild(card);
-          cardNodes.set(key,card);
-        }
-        card.querySelector('strong').textContent=valueFor(data,key);
-      }
-      snapshotEl.textContent=JSON.stringify(data,null,2);
-    }
-    async function refreshSnapshot(){
-      if(document.hidden) return;
-      try{
-        const response=await fetch('/monitor/snapshot',{headers:{'X-Monitor-Token':window.__localPageToken}});
-        if(!response.ok) throw new Error('HTTP '+response.status);
-        const snapshot=await response.json();
-        render({provider:boot.provider,upstream:boot.upstream,snapshot});
-        statusEl.textContent='自动刷新中（5 秒）';
-        statusEl.className='muted';
-        lastUpdatedEl.textContent='最后更新：'+new Date().toLocaleTimeString();
-      }catch(err){
-        statusEl.textContent='刷新失败：'+err.message;
-        statusEl.className='warn';
-      }
-    }
-    render(boot);
-    refreshSnapshot();
-    setInterval(refreshSnapshot,5000);
+    const boot=JSON.parse(document.getElementById('bootstrap').textContent),cardsEl=document.getElementById('summaryCards'),eventsEl=document.getElementById('recentEvents'),statusEl=document.getElementById('refreshStatus'),lastUpdatedEl=document.getElementById('lastUpdated');
+    function asNumber(value){const n=Number(value);return Number.isFinite(n)?n:0}function formatTokens(value){const n=asNumber(value);return new Intl.NumberFormat(undefined,{maximumFractionDigits:1,notation:n>=1000?'compact':'standard'}).format(n)}function formatDuration(value){const n=asNumber(value);if(n<1e3)return Math.round(n)+' ns';if(n<1e6)return(n/1e3).toFixed(1)+' µs';if(n<1e9)return(n/1e6).toFixed(1)+' ms';if(n<6e10)return(n/1e9).toFixed(2)+' s';return(n/6e10).toFixed(1)+' min'}function formatTime(value){const d=new Date(value);return value&&!Number.isNaN(d.getTime())?d.toLocaleString():'—'}
+    function createCard(label,value,detail){const card=document.createElement('article'),labelEl=document.createElement('span'),valueEl=document.createElement('strong');card.className='card';labelEl.className='muted';labelEl.textContent=label;valueEl.textContent=value;card.append(labelEl,valueEl);if(detail){const detailEl=document.createElement('span');detailEl.className='detail';detailEl.textContent=detail;card.appendChild(detailEl)}return card}
+    function eventTime(event){const time=new Date(event&&event.at).getTime();return Number.isNaN(time)?0:time}function renderEvents(recent){eventsEl.replaceChildren();const events=Array.isArray(recent)?recent.slice().sort((a,b)=>eventTime(b)-eventTime(a)):[];if(!events.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=7;cell.className='empty';cell.textContent='暂无最近事件';row.appendChild(cell);eventsEl.appendChild(row);return}for(const event of events){const row=document.createElement('tr'),modelProvider=[event.model,event.provider].filter(Boolean).join(' / ')||'—',tokens=asNumber(event.input_tokens)+asNumber(event.output_tokens)+asNumber(event.cache_tokens),cells=[formatTime(event.at),event.success?'成功':'失败',modelProvider,event.streaming?'流式':'非流式',formatTokens(tokens),formatDuration(event.duration),event.status_code?String(event.status_code):'—'];for(const text of cells){const cell=document.createElement('td');cell.textContent=text;row.appendChild(cell)}eventsEl.appendChild(row)}}
+    function render(data){const snapshot=data&&data.snapshot?data.snapshot:{},totals=snapshot.totals||{},requests=asNumber(totals.requests),success=asNumber(totals.success),input=asNumber(totals.input_tokens),output=asNumber(totals.output_tokens),cache=asNumber(totals.cache_tokens),totalTokens=input+output+cache,successRate=requests?(success/requests)*100:0,averageDuration=requests?asNumber(totals.total_duration)/requests:0;cardsEl.replaceChildren(createCard('输入 Tokens',formatTokens(input)),createCard('输出 Tokens',formatTokens(output)),createCard('缓存 Tokens',formatTokens(cache)),createCard('总 Tokens',formatTokens(totalTokens)),createCard('成功率',requests?successRate.toFixed(1)+'%':'—',formatTokens(success)+' / '+formatTokens(requests)+' 请求'),createCard('平均延迟',requests?formatDuration(averageDuration):'—'),createCard('流式 / 非流式',formatTokens(totals.streaming)+' / '+formatTokens(totals.non_streaming)),createCard('最后事件',formatTime(totals.last_event_at)),createCard('活跃连接',formatTokens(totals.active_requests)));renderEvents(snapshot.recent)}
+    async function refreshSnapshot(){if(document.hidden)return;try{const response=await fetch('/monitor/snapshot',{headers:{'X-Monitor-Token':window.__localPageToken}});if(!response.ok)throw new Error('HTTP '+response.status);const snapshot=await response.json();render({snapshot});statusEl.textContent='自动刷新中（5 秒）';statusEl.className='muted';lastUpdatedEl.textContent='最后更新：'+new Date().toLocaleTimeString()}catch(error){statusEl.textContent='刷新失败：'+(error&&error.message?error.message:'未知错误');statusEl.className='warn'}}render(boot);refreshSnapshot();setInterval(refreshSnapshot,5000);
   </script>
 </body>
 </html>

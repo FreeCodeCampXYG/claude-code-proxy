@@ -95,26 +95,26 @@ func promptsRecords(c *fiber.Ctx, store *diagnostics.Store, archive *promptarchi
 		return c.JSON(fiber.Map{"records": records, "total": total, "enabled": true, "source": "prompt_archive"})
 	}
 	if store == nil {
-		return c.JSON(fiber.Map{"records": []promptRecord{}, "total": 0, "enabled": false, "message": "Prompt 存档未开启；请设置 PROMPT_ARCHIVE_ENABLED=true 后重启。临时排障可用 -d 开启诊断元数据回退。"})
+		return c.JSON(fiber.Map{"records": []promptRecord{}, "total": 0, "enabled": false, "source": "unavailable", "message": "Prompt 存档未开启；请设置 PROMPT_ARCHIVE_ENABLED=true 后重启。临时排障可用 -d 开启诊断元数据回退。"})
 	}
 	query, keyword, err := promptsQuery(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	query.Keyword = keyword
 	events, err := store.Query(c.Context(), query)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	records := make([]promptRecord, 0, len(events))
 	for _, event := range events {
-		record := promptRecordFromSummary(event, false)
-		if keyword != "" && !promptRecordMatches(record, keyword) {
-			continue
-		}
-		records = append(records, record)
+		records = append(records, promptRecordFromSummary(event, false))
 	}
-	total := len(records)
-	return c.JSON(fiber.Map{"records": records, "total": total, "enabled": true})
+	total, err := store.Count(c.Context(), query)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"records": records, "total": total, "enabled": true, "source": "diagnostics"})
 }
 
 func promptsDetail(c *fiber.Ctx, store *diagnostics.Store, archive *promptarchive.Store) error {
@@ -166,28 +166,66 @@ func promptArchiveQuery(c *fiber.Ctx) (promptarchive.Query, error) {
 	return promptarchive.Query{Model: strings.TrimSpace(c.Query("model")), Keyword: strings.TrimSpace(c.Query("q")), Since: since, Until: until, Limit: limit, Offset: offset}, nil
 }
 
+const promptExportMaxRecords = 1000
+
 func promptsExport(c *fiber.Ctx, archive *promptarchive.Store) error {
 	if archive == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "PROMPT_ARCHIVE_ENABLED is required for export"})
+	}
+
+	format := strings.ToLower(strings.TrimSpace(c.Query("format")))
+	if format != "json" && format != "markdown" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "format must be json or markdown"})
 	}
 	query, err := promptArchiveQuery(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	records, err := archive.Query(c.Context(), query)
+	records, err := promptArchiveExportRecords(c, archive, query)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	format := strings.ToLower(strings.TrimSpace(c.Query("format")))
-	if format == "markdown" || format == "md" {
+
+	switch format {
+	case "markdown":
 		var b strings.Builder
 		for _, record := range records {
 			fmt.Fprintf(&b, "## %s\n- 时间：%s\n- 模型：%s\n- 摘要：%s\n- 消息数：%d\n- 工具数：%d\n\n", record.RequestID, record.CreatedAt.Format(time.RFC3339), record.Model, record.Summary, record.MessageCount, record.ToolCount)
 		}
 		c.Set(fiber.HeaderContentType, "text/markdown; charset=utf-8")
+		c.Set(fiber.HeaderContentDisposition, `attachment; filename="prompts-archive.md"`)
 		return c.SendString(b.String())
+	default:
+		encoded, err := json.Marshal(fiber.Map{"records": records})
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "encode prompt archive export"})
+		}
+		c.Set(fiber.HeaderContentType, "application/json; charset=utf-8")
+		c.Set(fiber.HeaderContentDisposition, `attachment; filename="prompts-archive.json"`)
+		return c.Send(encoded)
 	}
-	return c.JSON(fiber.Map{"records": records})
+}
+
+func promptArchiveExportRecords(c *fiber.Ctx, archive *promptarchive.Store, query promptarchive.Query) ([]promptarchive.Record, error) {
+	query.Offset = 0 // Exports always start at the first matching record.
+	query.Limit = 200
+	records := make([]promptarchive.Record, 0, promptExportMaxRecords)
+	for len(records) < promptExportMaxRecords {
+		page, err := archive.Query(c.Context(), query)
+		if err != nil {
+			return nil, err
+		}
+		remaining := promptExportMaxRecords - len(records)
+		if len(page) > remaining {
+			page = page[:remaining]
+		}
+		records = append(records, page...)
+		if len(page) < query.Limit || len(records) == promptExportMaxRecords {
+			break
+		}
+		query.Offset += len(page)
+	}
+	return records, nil
 }
 
 func promptsDelete(c *fiber.Ctx, archive *promptarchive.Store) error {

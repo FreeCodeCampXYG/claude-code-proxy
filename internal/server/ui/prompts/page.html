@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Prompt 存档</title>
   <style>
-    :root{color-scheme:light dark;--bg:#f7f8fb;--surface:#fff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}@media(prefers-color-scheme:dark){:root{--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:grid;gap:6px}input,select,button{font:inherit;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px}.primary{background:var(--accent);border-color:var(--accent);color:white}.muted{color:var(--muted)}.warn{color:var(--warn)}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left;vertical-align:top}tr[data-id]{cursor:pointer}tr[data-id]:hover{background:var(--surface-2)}pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px;overflow:auto}
+    :root{color-scheme:light dark;--bg:#f7f8fb;--surface:#fff;--surface-2:#eef2f7;--border:#d8dee9;--text:#172033;--muted:#5b667a;--accent:#4263eb;--danger:#c92a2a;--warn:#f08c00;--shadow:0 12px 32px rgba(15,23,42,.08)}@media(prefers-color-scheme:dark){:root{--bg:#0f1420;--surface:#171e2e;--surface-2:#202a3d;--border:#344055;--text:#f1f4f9;--muted:#a8b3c7;--accent:#7c9cff;--danger:#ff8787;--warn:#ffd43b;--shadow:0 12px 32px rgba(0,0,0,.28)}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1200px;margin:auto;padding:24px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}.toolbar,.pagination{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.pagination{align-items:center;margin-top:14px}.field{display:grid;gap:6px}input,select,button{font:inherit;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px}.primary{background:var(--accent);border-color:var(--accent);color:white}.danger{color:var(--danger)}button:disabled{cursor:not-allowed;opacity:.55}.muted{color:var(--muted)}.warn{color:var(--warn)}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left;vertical-align:top}tr[data-id]{cursor:pointer}tr[data-id]:hover{background:var(--surface-2)}td.actions{white-space:nowrap}pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px;overflow:auto}
   </style>
 </head>
 <body>
@@ -20,11 +20,13 @@
     <label class="field">关键词<input id="keyword" placeholder="搜索模型 / request id / 摘要"></label>
     <label class="field">模型<input id="model" placeholder="全部模型"></label>
     <label class="field">时间<select id="range"><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option><option value="all">全部</option></select></label>
+    <label class="field">每页<select id="pageSize"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
     <button class="primary" id="searchBtn">搜索</button><button id="exportJson">导出 JSON</button><button id="exportMarkdown">导出 Markdown</button>
   </section>
   <section class="panel">
     <h2>存档列表</h2>
-    <table><thead><tr><th>时间</th><th>模型</th><th>消息数</th><th>摘要</th><th>状态</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="muted">正在加载...</td></tr></tbody></table>
+    <table><thead><tr><th>时间</th><th>模型</th><th>消息数</th><th>摘要</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="muted">正在加载...</td></tr></tbody></table>
+    <div class="pagination"><button id="prevPage">上一页</button><span id="pageInfo" class="muted"></span><button id="nextPage">下一页</button></div>
   </section>
   <section class="panel">
     <h2>详情预览</h2>
@@ -33,34 +35,20 @@
 </main>
 <script>
 const boot=__PROMPTS_BOOTSTRAP__;
-const rows=document.getElementById('rows'),statusEl=document.getElementById('status'),stateEl=document.getElementById('archiveState');
-let lastRecords=[];
-function setState(){stateEl.textContent=boot.enabled?'已开启：读取诊断数据库中的请求摘要，保留期 '+boot.retention:'未开启：请用 -d 或 DIAGNOSTICS_ENABLED=true 重启代理；开启后只会记录新的请求。';stateEl.className=boot.enabled?'muted':'warn'}
+const rows=document.getElementById('rows'),statusEl=document.getElementById('status'),stateEl=document.getElementById('archiveState'),pageInfo=document.getElementById('pageInfo');
+const state={pageSize:Number(document.getElementById('pageSize').value),offset:0,total:0,source:'',enabled:false};
+function headers(){return {'X-Prompts-Token':window.__localPageToken}}
 function escapeHtml(value){return String(value||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function sinceForRange(){const value=document.getElementById('range').value;if(value==='all')return '';const d=new Date();d.setHours(d.getHours()-(value==='7d'?168:24));return d.toISOString()}
-async function loadRecords(){
-  const params=new URLSearchParams({limit:'100'}),q=document.getElementById('keyword').value.trim(),model=document.getElementById('model').value.trim(),since=sinceForRange();
-  if(q)params.set('q',q);if(model)params.set('model',model);if(since)params.set('since',since);else params.set('range','all');
-  rows.innerHTML='<tr><td colspan="5" class="muted">查询中...</td></tr>';
-  try{
-    const res=await fetch('/prompts/records?'+params,{headers:{'X-Prompts-Token':window.__localPageToken}});
-    const data=await res.json();
-    if(!res.ok)throw new Error(data.error||('HTTP '+res.status));
-    lastRecords=data.records||[];
-    if(!data.enabled){rows.innerHTML='<tr><td colspan="5" class="warn">'+escapeHtml(data.message||'Prompt 存档未开启')+'</td></tr>';return;}
-    if(!lastRecords.length){rows.innerHTML='<tr><td colspan="5" class="muted">没有查到记录。请确认已开启诊断，并在开启后产生新的 Claude 请求；当前筛选条件也可能过窄。</td></tr>';return;}
-    rows.innerHTML=lastRecords.map(r=>'<tr data-id="'+escapeHtml(r.request_id)+'"><td>'+new Date(r.created_at).toLocaleString()+'</td><td>'+escapeHtml(r.model||r.incoming_model||'unknown')+'</td><td>'+r.message_count+'</td><td>'+escapeHtml(r.summary)+'</td><td>'+escapeHtml(r.status)+'</td></tr>').join('');
-  }catch(err){rows.innerHTML='<tr><td colspan="5" class="warn">查询失败：'+escapeHtml(err.message)+'</td></tr>';}
-}
-async function loadDetail(id){
-  try{const res=await fetch('/prompts/'+encodeURIComponent(id),{headers:{'X-Prompts-Token':window.__localPageToken}});const data=await res.json();if(!res.ok)throw new Error(data.error||('HTTP '+res.status));statusEl.textContent=JSON.stringify(data,null,2);}catch(err){statusEl.textContent='详情读取失败：'+err.message;}
-}
-function download(name,type,text){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-document.getElementById('searchBtn').addEventListener('click',loadRecords);
-rows.addEventListener('click',e=>{const tr=e.target.closest('tr[data-id]');if(tr)loadDetail(tr.dataset.id)});
-document.getElementById('exportJson').addEventListener('click',()=>download('prompts.json','application/json',JSON.stringify(lastRecords,null,2)));
-document.getElementById('exportMarkdown').addEventListener('click',()=>download('prompts.md','text/markdown',lastRecords.map(r=>'## '+r.request_id+'\n- 时间：'+r.created_at+'\n- 模型：'+(r.model||'')+'\n- 摘要：'+r.summary+'\n- 状态：'+r.status).join('\n\n')));
-setState();loadRecords();
+function filterParams(includePage){const params=new URLSearchParams(),q=document.getElementById('keyword').value.trim(),model=document.getElementById('model').value.trim(),since=sinceForRange();if(q)params.set('q',q);if(model)params.set('model',model);if(since)params.set('since',since);else params.set('range','all');if(includePage){params.set('limit',String(state.pageSize));params.set('offset',String(state.offset))}return params}
+function setState(source,enabled,message){state.source=source||'';state.enabled=Boolean(enabled);if(!enabled){stateEl.textContent=message||'未开启：请用 -d 或 DIAGNOSTICS_ENABLED=true 重启代理。';stateEl.className='warn'}else if(source==='prompt_archive'){stateEl.textContent='独立 Prompt 存档已开启，保留期 '+boot.retention+'；可导出和删除存档记录。';stateEl.className='muted'}else{stateEl.textContent='当前显示诊断元数据回退，保留期 '+boot.retention+'；导出和删除仅适用于独立 Prompt 存档。';stateEl.className='warn'}document.getElementById('exportJson').disabled=source!=='prompt_archive';document.getElementById('exportMarkdown').disabled=source!=='prompt_archive'}
+function updatePagination(){const start=state.total?state.offset+1:0,end=Math.min(state.offset+state.pageSize,state.total);pageInfo.textContent='第 '+(Math.floor(state.offset/state.pageSize)+1)+' 页，显示 '+start+'–'+end+' / 共 '+state.total+' 条';document.getElementById('prevPage').disabled=state.offset===0;document.getElementById('nextPage').disabled=state.offset+state.pageSize>=state.total}
+async function loadRecords(){rows.innerHTML='<tr><td colspan="6" class="muted">查询中...</td></tr>';try{const res=await fetch('/prompts/records?'+filterParams(true),{headers:headers()}),data=await res.json();if(!res.ok)throw new Error(data.error||('HTTP '+res.status));state.total=Number(data.total)||0;setState(data.source,data.enabled,data.message);if(state.offset>=state.total&&state.offset>0){state.offset=Math.max(0,Math.floor((state.total-1)/state.pageSize)*state.pageSize);return loadRecords()}const records=data.records||[];if(!data.enabled){rows.innerHTML='<tr><td colspan="6" class="warn">'+escapeHtml(data.message||'Prompt 存档未开启')+'</td></tr>'}else if(!records.length){rows.innerHTML='<tr><td colspan="6" class="muted">没有查到记录。请确认开启后已产生新的 Claude 请求，或调整筛选条件。</td></tr>'}else{const deletable=data.source==='prompt_archive';rows.innerHTML=records.map(r=>'<tr data-id="'+escapeHtml(r.request_id)+'"><td>'+new Date(r.created_at).toLocaleString()+'</td><td>'+escapeHtml(r.model||r.incoming_model||'unknown')+'</td><td>'+r.message_count+'</td><td>'+escapeHtml(r.summary)+'</td><td>'+escapeHtml(r.status||'已存档')+'</td><td class="actions"><button class="danger" data-delete="'+escapeHtml(r.request_id)+'" '+(deletable?'':'disabled title="仅独立 Prompt 存档可删除"')+'>删除</button></td></tr>').join('')}updatePagination()}catch(err){rows.innerHTML='<tr><td colspan="6" class="warn">查询失败：'+escapeHtml(err.message)+'</td></tr>';state.total=0;updatePagination()}}
+async function loadDetail(id){try{const res=await fetch('/prompts/'+encodeURIComponent(id),{headers:headers()}),data=await res.json();if(!res.ok)throw new Error(data.error||('HTTP '+res.status));statusEl.textContent=JSON.stringify(data,null,2)}catch(err){statusEl.textContent='详情读取失败：'+err.message}}
+async function deleteRecord(id){if(state.source!=='prompt_archive'||!confirm('确定删除此 Prompt 存档记录？此操作无法恢复。'))return;try{const res=await fetch('/prompts/'+encodeURIComponent(id),{method:'DELETE',headers:headers()});if(!res.ok){const data=await res.json();throw new Error(data.error||('HTTP '+res.status))}statusEl.textContent='已删除存档记录 '+id;await loadRecords()}catch(err){statusEl.textContent='删除失败：'+err.message}}
+async function exportRecords(format){if(state.source!=='prompt_archive')return;try{const res=await fetch('/prompts/export?'+filterParams(false)+'&format='+format,{headers:headers()});if(!res.ok){const data=await res.json();throw new Error(data.error||('HTTP '+res.status))}const blob=await res.blob(),disposition=res.headers.get('Content-Disposition')||'',match=/filename="?([^";]+)"?/.exec(disposition),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=match?match[1]:'prompts-archive.'+(format==='json'?'json':'md');document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}catch(err){statusEl.textContent='导出失败：'+err.message}}
+function resetAndLoad(){state.offset=0;loadRecords()}
+document.getElementById('searchBtn').addEventListener('click',resetAndLoad);document.getElementById('pageSize').addEventListener('change',()=>{state.pageSize=Number(document.getElementById('pageSize').value);resetAndLoad()});document.querySelectorAll('#keyword,#model,#range').forEach(el=>el.addEventListener('change',resetAndLoad));document.querySelectorAll('#keyword,#model').forEach(el=>el.addEventListener('keydown',e=>{if(e.key==='Enter')resetAndLoad()}));document.getElementById('prevPage').addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.pageSize);loadRecords()});document.getElementById('nextPage').addEventListener('click',()=>{state.offset+=state.pageSize;loadRecords()});rows.addEventListener('click',e=>{const button=e.target.closest('[data-delete]');if(button){e.stopPropagation();deleteRecord(button.dataset.delete);return}const tr=e.target.closest('tr[data-id]');if(tr)loadDetail(tr.dataset.id)});document.getElementById('exportJson').addEventListener('click',()=>exportRecords('json'));document.getElementById('exportMarkdown').addEventListener('click',()=>exportRecords('markdown'));setState(boot.archive_enabled?'prompt_archive':boot.diagnostics_enabled?'diagnostics':'',boot.enabled);loadRecords();
 </script>
 </body>
 </html>

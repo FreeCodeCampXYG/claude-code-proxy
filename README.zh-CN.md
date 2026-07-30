@@ -200,6 +200,12 @@ EOF
 - `OPENROUTER_APP_NAME`
 - `OPENROUTER_APP_URL`
 
+### Playground 功能配置
+
+- `OCR_MODEL`：可选的视觉 Chat Completions 模型，用于 Playground OCR；上传的 JPEG/PNG/WebP 仅在本次请求发送给上游，代理不持久化图片字节。
+- `PPT_MODEL`：可选的 Playground PPT 大纲模型覆盖。
+- `IMAGE_API_URL`、`IMAGE_API_KEY`、`IMAGE_MODEL`：三项必须同时配置才启用独立图片生成；图片 key 绝不回退复用 `OPENAI_API_KEY`。
+
 ### 诊断
 
 - `DIAGNOSTICS_ENABLED`
@@ -232,9 +238,9 @@ EOF
 ### Playground 结构
 
 - **通用对话**：流式输出、停止生成、reasoning/text 分离、手动模型
-- **图片工作流**：多提示词、多图、A→B 模型链路、画布预览、局部修改入口
-- **OCR**：后续可继续扩展为更完整的多模态流程
-- **PPT**：结构化生成与预览占位
+- **图片工作流**：可选独立图片 API，返回有界本地预览（需同时配置 `IMAGE_API_URL`、`IMAGE_API_KEY`、`IMAGE_MODEL`，绝不回退复用聊天 key）
+- **OCR**：上传 JPEG/PNG/WebP 到支持视觉的聊天模型（可选 `OCR_MODEL`）；代理不持久化图片字节
+- **PPT**：校验 `ppt-outline/v1` 结构并提供预览、Markdown/HTML 导出（不生成 `.pptx`）
 - **模型与 Key**：为多 Provider、多 Key、多接口预留
 - **模板**：任务模板和 workflow 元数据
 

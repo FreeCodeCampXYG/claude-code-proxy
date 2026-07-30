@@ -35,7 +35,7 @@ func TestMonitorRoutesRequireLoopbackAndExposeSnapshot(t *testing.T) {
 	pageBody, _ := io.ReadAll(pageResp.Body)
 	pageResp.Body.Close()
 	pageText := string(pageBody)
-	for _, fragment := range []string{"流量监控", "window.__localPageToken=", "/monitor/snapshot", "X-Monitor-Token", "setInterval", "lastUpdated"} {
+	for _, fragment := range []string{"流量监控", "window.__localPageToken=", "/monitor/snapshot", "X-Monitor-Token", "setInterval", "lastUpdated", "输入 Tokens", "成功率", "平均延迟", "最近事件", "进程内存统计", "formatDuration"} {
 		if !strings.Contains(pageText, fragment) {
 			t.Fatalf("monitor page missing %q: %s", fragment, pageBody)
 		}

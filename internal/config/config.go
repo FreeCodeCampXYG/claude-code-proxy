@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -105,6 +106,14 @@ type Config struct {
 	PromptArchiveEnabled   bool
 	PromptArchiveDBPath    string
 	PromptArchiveRetention time.Duration
+
+	// Playground feature configuration. Image generation uses a deliberately
+	// independent endpoint and credential; it never falls back to the chat key.
+	ImageAPIURL string
+	ImageAPIKey string
+	ImageModel  string
+	OCRModel    string
+	PPTModel    string
 
 	// Model routing (pattern-based if not set)
 	OpusModel   string
@@ -214,6 +223,13 @@ func Load() (*Config, error) {
 		PromptArchiveDBPath:    os.Getenv("PROMPT_ARCHIVE_DB_PATH"),
 		PromptArchiveRetention: getEnvAsDurationOrDefault("PROMPT_ARCHIVE_RETENTION", 168*time.Hour),
 
+		// Playground feature configuration
+		ImageAPIURL: strings.TrimRight(strings.TrimSpace(os.Getenv("IMAGE_API_URL")), "/"),
+		ImageAPIKey: strings.TrimSpace(os.Getenv("IMAGE_API_KEY")),
+		ImageModel:  strings.TrimSpace(os.Getenv("IMAGE_MODEL")),
+		OCRModel:    strings.TrimSpace(os.Getenv("OCR_MODEL")),
+		PPTModel:    strings.TrimSpace(os.Getenv("PPT_MODEL")),
+
 		// Pattern-based routing (optional overrides)
 		OpusModel:   getEnvOrDefault("ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"),
 		SonnetModel: getEnvOrDefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"),
@@ -270,6 +286,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.PromptArchiveEnabled && cfg.PromptArchiveRetention <= 0 {
 		return nil, fmt.Errorf("PROMPT_ARCHIVE_RETENTION must be a positive Go duration")
+	}
+	if err := validateImageConfig(cfg); err != nil {
+		return nil, err
 	}
 	if cfg.ContextWindowPatternsMode != "append" && cfg.ContextWindowPatternsMode != "override" {
 		return nil, fmt.Errorf("CONTEXT_WINDOW_ERROR_PATTERNS_MODE must be append or override")
@@ -484,6 +503,38 @@ func (c *Config) ChatCompletionsURL() string {
 		return baseURL
 	}
 	return baseURL + "/chat/completions"
+}
+
+func (c *Config) ImageGenerationsURL() string {
+	parsed, err := url.Parse(strings.TrimSpace(c.ImageAPIURL))
+	if err != nil {
+		return ""
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if !strings.HasSuffix(strings.ToLower(parsed.Path), "/images/generations") {
+		parsed.Path += "/images/generations"
+	}
+	return parsed.String()
+}
+
+func validateImageConfig(cfg *Config) error {
+	configured := 0
+	for _, value := range []string{cfg.ImageAPIURL, cfg.ImageAPIKey, cfg.ImageModel} {
+		if strings.TrimSpace(value) != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil
+	}
+	if configured != 3 {
+		return fmt.Errorf("IMAGE_API_URL, IMAGE_API_KEY, and IMAGE_MODEL must be configured together")
+	}
+	parsed, err := url.Parse(cfg.ImageAPIURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("IMAGE_API_URL must be an absolute http or https URL without credentials or fragment")
+	}
+	return nil
 }
 
 // IsLocalhost returns true if the base URL points to localhost

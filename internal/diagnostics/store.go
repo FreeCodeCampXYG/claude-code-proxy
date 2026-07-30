@@ -221,6 +221,7 @@ type EventSummary struct {
 
 type Query struct {
 	RequestID       string
+	Keyword         string
 	Model           string
 	IncomingModel   string
 	RouteRule       string
@@ -1499,6 +1500,7 @@ func buildWhere(query Query) (string, []any) {
 	var clauses []string
 	var args []any
 	if query.RequestID != "" { clauses = append(clauses, "request_id = ?"); args = append(args, query.RequestID) }
+	if query.Keyword != "" { clauses = append(clauses, "(request_id LIKE ? OR model LIKE ? OR incoming_model LIKE ? OR completion_state LIKE ?)"); like := "%"+query.Keyword+"%"; args = append(args, like, like, like, like) }
 	if query.Model != "" { clauses = append(clauses, "model = ?"); args = append(args, query.Model) }
 	if query.IncomingModel != "" { clauses = append(clauses, "incoming_model = ?"); args = append(args, query.IncomingModel) }
 	if query.RouteRule != "" { clauses = append(clauses, "route_rule = ?"); args = append(args, query.RouteRule) }

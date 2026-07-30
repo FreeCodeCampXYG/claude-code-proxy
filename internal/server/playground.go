@@ -28,7 +28,10 @@ func setupPlaygroundEndpoints(app *fiber.App, cfg *config.Config) {
 	group.Post("/chat/stream", func(c *fiber.Ctx) error { return playgroundChatStream(c, cfg) })
 	group.Post("/ocr", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "ocr") })
 	group.Post("/ocr/upload", func(c *fiber.Ctx) error { return playgroundOCRUpload(c, cfg) })
-	group.Get("/image", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "image") })
+	group.Post("/ppt", func(c *fiber.Ctx) error { return playgroundPPT(c, cfg) })
+	group.Post("/ppt/export", func(c *fiber.Ctx) error { return playgroundPPTExport(c) })
+	group.Post("/image", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "image") })
+	group.Post("/images/generations", func(c *fiber.Ctx) error { return playgroundImageGeneration(c, cfg) })
 }
 
 func playgroundHTML(c *fiber.Ctx, token string, cfg *config.Config) error {
@@ -60,10 +63,24 @@ func playgroundConfig(cfg *config.Config) fiber.Map {
 		"limits": fiber.Map{
 			"max_rounds": 2,
 		},
-		"image": fiber.Map{
-			"configured": strings.TrimSpace(cfg.OpenAIBaseURL) != "",
+		"image": playgroundImageConfig(cfg),
+		"ocr": fiber.Map{
+			"model":           cfg.OCRModel,
+			"max_image_bytes": playgroundMaxOCRImageBytes,
+			"mime_types":      []string{"image/jpeg", "image/png", "image/webp"},
 		},
+		"ppt": fiber.Map{"model": cfg.PPTModel, "schema_version": playgroundPPTSchemaVersion},
 	}
+}
+
+func playgroundImageConfig(cfg *config.Config) fiber.Map {
+	configured := cfg != nil && cfg.ImageAPIURL != "" && cfg.ImageAPIKey != "" && cfg.ImageModel != ""
+	endpoint, model := "", ""
+	if configured {
+		endpoint = safeBaseURL(cfg.ImageGenerationsURL())
+		model = cfg.ImageModel
+	}
+	return fiber.Map{"configured": configured, "endpoint": endpoint, "model": model, "sizes": []string{"1024x1024", "1792x1024", "1024x1792"}, "max_count": 2}
 }
 
 func containsString(values []string, value string) bool {
@@ -119,14 +136,6 @@ func playgroundChatStream(c *fiber.Ctx, cfg *config.Config) error {
 	return nil
 }
 
-func playgroundOCRUpload(c *fiber.Ctx, cfg *config.Config) error {
-	file, err := c.FormFile("image")
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "image file is required"})
-	}
-	return c.JSON(fiber.Map{"task": "ocr", "content": fmt.Sprintf("已收到图片：%s。当前先接表单上传闭环，后续会继续接入真正的多模态 OCR 输入。", file.Filename), "usage": fiber.Map{"mode": "upload", "provider": safeBaseURL(cfg.OpenAIBaseURL)}})
-}
-
 func playgroundTextTask(c *fiber.Ctx, cfg *config.Config, task string) error {
 	var req playgroundChatRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -139,14 +148,7 @@ func playgroundTextTask(c *fiber.Ctx, cfg *config.Config, task string) error {
 	switch task {
 	case "ocr":
 		if strings.TrimSpace(req.System) == "" {
-			req.System = "你是 OCR 识图助手。识别图片或用户输入中的文字，保持原始格式，无法识别时说明原因。"
-		}
-		if strings.TrimSpace(req.Image) != "" {
-			req.Prompt = req.Prompt + "\n\n[图片已由页面上传为 data URL；当前上游若支持多模态，可在后续版本直接传图。]"
-		}
-	case "ppt":
-		if strings.TrimSpace(req.System) == "" {
-			req.System = "你是专业 PPT 策划助手。请输出 JSON，包含 title、audience、style、slides 数组；每页包含 title、bullets、speaker_notes。"
+			req.System = "你是 OCR 指令助手。请为用户准备清晰的图像文字识别指令，不要声称已读取图片。"
 		}
 	case "image":
 		if strings.TrimSpace(req.System) == "" {
@@ -211,6 +213,5 @@ func applyPlaygroundProviderOptions(req *models.OpenAIRequest, cfg *config.Confi
 		req.ReasoningEffort = converter.DefaultNewAPIEffort
 	case config.ProviderNewAPI:
 		req.StreamOptions = map[string]interface{}{"include_usage": true}
-		req.ReasoningEffort = converter.DefaultNewAPIEffort
 	}
 }

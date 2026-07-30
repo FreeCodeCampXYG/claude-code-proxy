@@ -38,7 +38,7 @@ func localPageSecurity(options localPageOptions) fiber.Handler {
 		c.Set("Cache-Control", "no-store")
 		c.Set("X-Content-Type-Options", "nosniff")
 		c.Set("Referrer-Policy", "no-referrer")
-		c.Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+		c.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 		origin := strings.TrimSpace(c.Get("Origin"))
 		if origin != "" && !isLoopbackOrigin(origin) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": fmt.Sprintf("%s origin must be loopback", strings.TrimPrefix(options.Path, "/"))})

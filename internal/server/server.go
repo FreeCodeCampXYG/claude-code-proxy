@@ -72,6 +72,8 @@ func Start(cfg *config.Config) error {
 		DisableStartupMessage: true,
 		ServerHeader:          "Claude-Code-Proxy",
 		AppName:               "Claude Code Proxy v" + ProxyVersion,
+		// Playground OCR accepts a 10 MiB image plus multipart framing.
+		BodyLimit: 11 * 1024 * 1024,
 	})
 
 	// Middleware
