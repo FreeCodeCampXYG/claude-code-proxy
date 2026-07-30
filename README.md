@@ -555,6 +555,8 @@ Enable debug mode to see capability-cache activity and other operational metadat
 
 `-d` does not print full request and response bodies. It enables the local diagnostics database and the loopback-only viewer at `http://127.0.0.1:8082/debug/logs`. To enable diagnostics without verbose console debug messages, set `DIAGNOSTICS_ENABLED=true`. Records are retained for `72h` by default; override this with `DIAGNOSTICS_RETENTION` and override the database location with `DIAGNOSTICS_DB_PATH`.
 
+If startup reports an incompatible diagnostics content schema, foreign-key integrity failure, or unexpected trigger, the existing SQLite database does not match the supported diagnostics contract. The proxy will not delete or rebuild it automatically: back it up, inspect its schema/triggers, or point `DIAGNOSTICS_DB_PATH` to a new database. This is different from `context_window_exceeded`, which is the classified outcome of an upstream model rejecting an over-limit request rather than a diagnostics persistence failure.
+
 ## License
 
 MIT

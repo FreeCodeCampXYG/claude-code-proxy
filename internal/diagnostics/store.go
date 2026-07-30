@@ -538,6 +538,8 @@ var requiredSchemaV5Columns = []string{
 	"incoming_model", "route_text_chars", "has_last_tool_use", "has_last_tool_result", "router_enabled",
 }
 
+var requiredDiagnosticsContentColumns = []string{"request_id", "attempt_number", "boundary", "created_at", "expires_at", "capture_mode", "content"}
+
 var requiredSchemaV5Indexes = map[string]struct {
 	columns   []string
 	statement string
@@ -546,6 +548,58 @@ var requiredSchemaV5Indexes = map[string]struct {
 	"idx_diagnostics_events_model":      {columns: []string{"model", "created_at"}, statement: `CREATE INDEX idx_diagnostics_events_model ON diagnostics_events(model, created_at DESC)`},
 	"idx_diagnostics_events_task_hash":  {columns: []string{"task_hash", "created_at"}, statement: `CREATE INDEX idx_diagnostics_events_task_hash ON diagnostics_events(task_hash, created_at DESC)`},
 	"idx_diagnostics_content_created_at": {columns: []string{"created_at", "request_id", "attempt_number", "boundary"}, statement: `CREATE INDEX idx_diagnostics_content_created_at ON diagnostics_content(created_at DESC, request_id DESC, attempt_number DESC, boundary)`},
+	"idx_diagnostics_content_expires_at": {columns: []string{"expires_at", "request_id"}, statement: `CREATE INDEX idx_diagnostics_content_expires_at ON diagnostics_content(expires_at, request_id)`},
+}
+
+func (store *Store) validateDiagnosticsContentSchema(ctx context.Context) error {
+	rows, err := store.db.QueryContext(ctx, "PRAGMA table_info(diagnostics_content)")
+	if err != nil { return fmt.Errorf("inspect diagnostics content schema: %w", err) }
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil { _ = rows.Close(); return fmt.Errorf("scan diagnostics content schema: %w", err) }
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil { _ = rows.Close(); return fmt.Errorf("iterate diagnostics content schema: %w", err) }
+	if err := rows.Close(); err != nil { return fmt.Errorf("close diagnostics content schema: %w", err) }
+	var missing []string
+	for _, name := range requiredDiagnosticsContentColumns { if !columns[name] { missing = append(missing, name) } }
+	if len(missing) > 0 { return fmt.Errorf("diagnostics content schema is incompatible: missing required columns: %s", strings.Join(missing, ", ")) }
+
+	fkRows, err := store.db.QueryContext(ctx, "PRAGMA foreign_key_list(diagnostics_content)")
+	if err != nil { return fmt.Errorf("inspect diagnostics content foreign key: %w", err) }
+	validFK := false
+	for fkRows.Next() {
+		var id, sequence int
+		var table, from, to, onUpdate, onDelete, match string
+		if err := fkRows.Scan(&id, &sequence, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil { _ = fkRows.Close(); return fmt.Errorf("scan diagnostics content foreign key: %w", err) }
+		if sequence == 0 && table == "diagnostics_events" && from == "request_id" && to == "request_id" && strings.EqualFold(onDelete, "CASCADE") { validFK = true }
+	}
+	if err := fkRows.Err(); err != nil { _ = fkRows.Close(); return fmt.Errorf("iterate diagnostics content foreign key: %w", err) }
+	if err := fkRows.Close(); err != nil { return fmt.Errorf("close diagnostics content foreign key: %w", err) }
+	if !validFK { return fmt.Errorf("diagnostics content schema is incompatible: request_id foreign key must reference diagnostics_events(request_id) ON DELETE CASCADE") }
+
+	checkRows, err := store.db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil { return fmt.Errorf("check diagnostics foreign key integrity: %w", err) }
+	if checkRows.Next() {
+		var table string
+		var rowID any
+		var parent string
+		var fkID int
+		if err := checkRows.Scan(&table, &rowID, &parent, &fkID); err != nil { _ = checkRows.Close(); return fmt.Errorf("scan diagnostics foreign key integrity: %w", err) }
+		_ = checkRows.Close()
+		return fmt.Errorf("diagnostics database foreign key integrity failed for table %s (parent %s); preserve this database and configure a new DIAGNOSTICS_DB_PATH or repair its schema", table, parent)
+	}
+	if err := checkRows.Err(); err != nil { _ = checkRows.Close(); return fmt.Errorf("iterate diagnostics foreign key integrity: %w", err) }
+	if err := checkRows.Close(); err != nil { return fmt.Errorf("close diagnostics foreign key integrity: %w", err) }
+
+	triggerRows, err := store.db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('diagnostics_events', 'diagnostics_content')`)
+	if err != nil { return fmt.Errorf("inspect diagnostics triggers: %w", err) }
+	defer triggerRows.Close()
+	if triggerRows.Next() { var name string; if err := triggerRows.Scan(&name); err != nil { return fmt.Errorf("scan diagnostics trigger: %w", err) }; return fmt.Errorf("diagnostics database has unexpected trigger %q; preserve this database and remove the trigger or configure a new DIAGNOSTICS_DB_PATH", name) }
+	return triggerRows.Err()
 }
 
 func (store *Store) validateAndRepairSchemaV5(ctx context.Context) error {
@@ -579,6 +633,9 @@ func (store *Store) validateAndRepairSchemaV5(ctx context.Context) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("diagnostics schema v5 is incompatible: missing required columns: %s", strings.Join(missing, ", "))
+	}
+	if err := store.validateDiagnosticsContentSchema(ctx); err != nil {
+		return err
 	}
 
 	for name, required := range requiredSchemaV5Indexes {

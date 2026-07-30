@@ -44,7 +44,7 @@ func Start(cfg *config.Config) error {
 			CloseTimeout:     cfg.DiagnosticsCloseTimeout,
 		})
 		if err != nil {
-			return fmt.Errorf("initialize diagnostics store: %w", err)
+			return fmt.Errorf("initialize diagnostics store at %s: %w; preserve this database, then inspect its schema/foreign-key integrity or configure a new DIAGNOSTICS_DB_PATH", cfg.DiagnosticsDBPath, err)
 		}
 		defer func() {
 			if err := diagnosticsStore.Close(); err != nil {

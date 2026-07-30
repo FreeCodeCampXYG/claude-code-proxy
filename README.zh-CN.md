@@ -316,6 +316,8 @@ ANTHROPIC_BASE_URL=http://localhost:8082 claude --model haiku -p "hi"
 
 启用 `-d` 后，可在本机打开诊断页面查看请求统计和记录。
 
+如果启动时报 diagnostics content schema、foreign key integrity 或 unexpected trigger 错误，说明现有诊断 SQLite 数据库不符合当前结构，代理会拒绝启动诊断而不会自动删除或重建该数据库。请先备份该文件，再检查数据库 schema/trigger，或配置新的 `DIAGNOSTICS_DB_PATH`。这与 `context_window_exceeded` 不同：后者表示上游模型拒绝了超出上下文窗口的请求，属于该次请求的正常失败分类，不是诊断数据库写入问题。
+
 ## 许可证
 
 MIT
