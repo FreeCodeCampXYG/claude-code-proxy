@@ -27,8 +27,8 @@ func setupPlaygroundEndpoints(app *fiber.App, cfg *config.Config) {
 	group.Get("/config", func(c *fiber.Ctx) error { return c.JSON(playgroundConfig(cfg)) })
 	group.Post("/chat/stream", func(c *fiber.Ctx) error { return playgroundChatStream(c, cfg) })
 	group.Post("/ocr", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "ocr") })
-	group.Post("/ppt", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "ppt") })
-	group.Post("/image", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "image") })
+	group.Post("/ocr/upload", func(c *fiber.Ctx) error { return playgroundOCRUpload(c, cfg) })
+	group.Get("/image", func(c *fiber.Ctx) error { return playgroundTextTask(c, cfg, "image") })
 }
 
 func playgroundHTML(c *fiber.Ctx, token string, cfg *config.Config) error {
@@ -117,6 +117,14 @@ func playgroundChatStream(c *fiber.Ctx, cfg *config.Config) error {
 		_ = w.Flush()
 	})
 	return nil
+}
+
+func playgroundOCRUpload(c *fiber.Ctx, cfg *config.Config) error {
+	file, err := c.FormFile("image")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "image file is required"})
+	}
+	return c.JSON(fiber.Map{"task": "ocr", "content": fmt.Sprintf("已收到图片：%s。当前先接表单上传闭环，后续会继续接入真正的多模态 OCR 输入。", file.Filename), "usage": fiber.Map{"mode": "upload", "provider": safeBaseURL(cfg.OpenAIBaseURL)}})
 }
 
 func playgroundTextTask(c *fiber.Ctx, cfg *config.Config, task string) error {

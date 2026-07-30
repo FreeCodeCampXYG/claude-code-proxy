@@ -22,14 +22,17 @@ A lightweight HTTP proxy that enables Claude Code to work with OpenAI-compatible
   - Streaming responses with real-time token tracking
   - Proper SSE event formatting
 - ✅ **Multiple Provider Support** - OpenRouter, OpenAI Direct, self-hosted NewAPI, and Ollama
-  - **OpenRouter**: 200+ models (GPT, Grok, Gemini, etc.) through single API
+  - **OpenRouter**: 200+ models (GPT, Grok, Gemini, etc.) through a single API
   - **OpenAI Direct**: Native GPT-5 reasoning model support
-  - **NewAPI**: Self-hosted OpenAI-compatible gateway with Claude effort mapping
+  - **NewAPI**: Self-hosted OpenAI-compatible gateway with transparent Claude effort forwarding
   - **Ollama**: Free local inference with DeepSeek-R1, Llama3, Qwen, etc.
 - ✅ **Adaptive Per-Model Detection** - Zero-config provider compatibility
   - Automatically learns which parameters each model supports
-  - No hardcoded model patterns - works with any future model/provider
+  - No hardcoded model patterns - works with future model/provider changes
   - Per-model capability caching for instant subsequent requests
+- ✅ **Prompt archive and diagnostics UI** - Local-only browser tools for request inspection and export
+- ✅ **Interactive Playground** - Multi-stage prompt, OCR, PPT, and image workflow workbench
+- ✅ **Local dashboard** - Single-entry navigation for proxy, monitor, prompts, settings, and playground pages
 - ✅ **Pattern-based routing** - Auto-detects Claude models and routes to appropriate backend models
 - ✅ **Zero dependencies** - Single ~10MB binary, no runtime needed
 - ✅ **Daemon mode** - Runs in background, serves multiple Claude Code sessions
@@ -134,18 +137,7 @@ ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6
 EOF
 ```
 
-Set `OPENAI_PROVIDER=newapi` explicitly: localhost URLs would otherwise be auto-detected as Ollama, while custom domains would be treated as generic providers. The proxy maps Claude `output_config.effort` to NewAPI `reasoning_effort` as follows:
-
-| Claude effort | NewAPI `reasoning_effort` |
-|---------------|---------------------------|
-| `light` | `light` |
-| `low` | `low` |
-| `medium` | `medium` |
-| `high` | `high` |
-| `xhigh` | `xhigh` |
-| `max` | `max` |
-
-The proxy preserves any non-empty explicit effort value instead of deriving it from the Claude model tier or restricting it to a fixed list. It trims whitespace and normalizes casing before forwarding. If Claude Code does not send `output_config.effort`, the proxy omits `reasoning_effort` and lets NewAPI/GPT use its configured default. `thinking.budget_tokens` is not converted into an effort level.
+Set `OPENAI_PROVIDER=newapi` explicitly: localhost URLs would otherwise be auto-detected as Ollama, while custom domains would be treated as generic providers. The proxy forwards Claude `output_config.effort` to NewAPI `reasoning_effort` exactly as provided after trim+lowercase. If Claude Code does not send `output_config.effort`, the proxy omits `reasoning_effort` and lets NewAPI/GPT use its configured default. `thinking.budget_tokens` is not converted into an effort level.
 
 **Option 4: Ollama (Local)**
 ```bash
@@ -167,7 +159,7 @@ EOF
 | **Cost** | Pay-per-use | Pay-per-use | Deployment dependent | Free |
 | **Setup** | Easy | Easy | Self-hosted | Requires local install |
 | **Models** | 200+ | OpenAI only | Instance dependent | Open source only |
-| **Reasoning** | Yes (via GPT/Grok/etc) | Yes (GPT-5) | Yes (effort mapping) | Yes (DeepSeek-R1) |
+| **Reasoning** | Yes (via GPT/Grok/etc) | Yes (GPT-5) | Yes (transparent effort forwarding) | Yes (DeepSeek-R1) |
 | **Tool Calling** | Yes | Yes | Model dependent | Model dependent |
 | **Privacy** | Cloud | Cloud | Self-hosted | 100% local |
 | **Speed** | Fast | Fast | Deployment dependent | Very fast (local) |
@@ -251,20 +243,6 @@ ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5
 ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5-mini
 ```
 
-## Build for Distribution
-
-```bash
-# Build for all platforms
-make build-all
-
-# Output:
-# dist/claude-code-proxy-darwin-amd64
-# dist/claude-code-proxy-darwin-arm64
-# dist/claude-code-proxy-linux-amd64
-# dist/claude-code-proxy-linux-arm64
-# dist/claude-code-proxy-windows-amd64.exe
-```
-
 ## Configuration Reference
 
 **Required:**
@@ -279,7 +257,7 @@ make build-all
   - For Ollama: `http://localhost:11434/v1`
   - For other providers: Use their OpenAI-compatible endpoint
 - `OPENAI_PROVIDER` - Optional explicit provider selection: `openrouter`, `openai`, `ollama`, `newapi`, or `generic`
-  - Set `newapi` for a self-hosted NewAPI deployment to enable its reasoning-effort mapping
+  - Set `newapi` for a self-hosted NewAPI deployment to enable transparent effort forwarding
 
 **Optional - Model Routing:**
 - `ANTHROPIC_DEFAULT_OPUS_MODEL` - Override opus routing (default: `gpt-5`)
@@ -305,11 +283,10 @@ ANTHROPIC_DEFAULT_OPUS_MODEL=openai/gpt-5
 - `DIAGNOSTICS_RETENTION` - Retention as a positive Go duration (default: `72h`; cleanup runs at startup)
 - `DIAGNOSTICS_BUSY_TIMEOUT` - SQLite busy timeout (default: `5s`)
 
-Diagnostics can also be enabled with `-d`/`--debug`. It takes effect only for a newly started proxy: if one is already running, run `claude-code-proxy stop` first, then restart it with `-d`. `-d` enables **redacted diagnostics only**; it never enables content capture. When enabled, open `http://127.0.0.1:8082/debug/logs` (replace `8082` if `PORT` differs). Check `/health` for `"diagnostics_enabled": true`; the diagnostics routes accept only loopback connections, and forwarded headers do not bypass this restriction.
-
-By default, diagnostics retain only redacted operational metadata. Secrets and conversational fields are replaced with type and length descriptors; no redaction hashes are exposed. Final upstream failures are logged with request correlation and status metadata only, never upstream bodies. Context-window and other 5xx failures are not adaptive-retried; the one capability fallback is reserved for explicit validation errors that reject `max_tokens` or `max_completion_tokens`.
-
-When `DIAGNOSTICS_CAPTURE_CONTENT=true` is explicitly set, the local viewer may retain bounded snapshots of the inbound Claude request, converted upstream request, upstream response, and returned Claude response. Bounded valid JSON remains fully viewable after secret removal and basename-only path normalization. Oversized valid JSON is stored as a clearly labelled first/last UTF-8-safe excerpt with an omitted-character count; malformed data and all request headers remain excluded. Streams are normalized into their semantic content and are never saved as original SSE frames. Content snapshots are short-lived, never included in NDJSON export, and available only through the protected local viewer. The SQLite database is not encrypted, so protect the database directory and any data copied from the viewer as sensitive diagnostic data.
+**Optional - Prompt Archive:**
+- `PROMPT_ARCHIVE_ENABLED` - Enable independent Prompt 存档 database used by `/prompts`
+- `PROMPT_ARCHIVE_DB_PATH` - Override the Prompt Archive SQLite path
+- `PROMPT_ARCHIVE_RETENTION` - Prompt Archive retention as a positive Go duration (default: `168h`)
 
 **Optional - Security:**
 - `ANTHROPIC_API_KEY` - Client API key validation (optional)
@@ -320,6 +297,51 @@ When `DIAGNOSTICS_CAPTURE_CONTENT=true` is explicitly set, the local viewer may 
 - `HOST` - Server host (default: `0.0.0.0`)
 - `PORT` - Server port (default: `8082`)
 - `PASSTHROUGH_MODE` - Direct proxy to Anthropic API (default: `false`)
+
+## Local Web UI
+
+The proxy now ships with loopback-only browser pages:
+
+- `/` - dashboard
+- `/debug/logs` - diagnostics viewer
+- `/monitor` - traffic monitor
+- `/prompts` - prompt archive browser
+- `/playground` - interactive workbench
+
+### Playground layout
+
+The Playground page is structured for long-term expansion:
+
+- **Chat**: streaming response, stop generation, reasoning/text split, manual model entry
+- **Image workflow**: multi-prompt input, multi-image placeholders, A→B model chain, canvas preview, local edit hooks
+- **OCR**: base multi-modal task endpoint, ready for future direct image upload
+- **PPT**: structured slide generation and preview placeholder
+- **Providers / Keys**: UI scaffold for multiple providers, base URLs, and key labels
+- **Templates**: persisted task presets with workflow metadata
+
+### Prompt archive
+
+Prompt Archive is independent from diagnostics:
+
+- Enable with `PROMPT_ARCHIVE_ENABLED=true`
+- Use `PROMPT_ARCHIVE_DB_PATH` to change the database location
+- Use `PROMPT_ARCHIVE_RETENTION` to control retention
+
+It stores redacted request summaries and metadata for search, export, and debugging.
+
+## Build for Distribution
+
+```bash
+# Build for all platforms
+make build-all
+
+# Output:
+# dist/claude-code-proxy-darwin-amd64
+# dist/claude-code-proxy-darwin-arm64
+# dist/claude-code-proxy-linux-amd64
+# dist/claude-code-proxy-linux-arm64
+# dist/claude-code-proxy-windows-amd64.exe
+```
 
 ## Project Structure
 
@@ -446,7 +468,7 @@ See [CLAUDE.md](CLAUDE.md#manual-testing) for detailed testing instructions incl
    - Preserves all metadata and signatures
 
 3. **Streaming**:
-   - Converts OpenAI SSE chunks to Claude SSE events
+   - Converts OpenAI SSE chunks → Claude SSE events
    - Generates proper event sequence (message_start, content_block_start, deltas, etc.)
    - Tracks content block indices for proper Claude Code rendering
 
@@ -478,7 +500,7 @@ The proxy uses a fully adaptive system that automatically learns what parameters
 
 - **Zero Configuration** - No need to know which parameters each provider supports
 - **Future-Proof** - Works with any new model/provider without code changes
-- **Fast** - Only 1-2 second penalty on first request, instant thereafter
+- **Fast** - Only 1-2 second first request penalty, instant thereafter
 - **Provider-Agnostic** - Automatically adapts to OpenRouter, OpenAI Direct, Ollama, OpenWebUI, or any OpenAI-compatible provider
 - **Per-Model Granularity** - Same model name on different providers cached separately
 
