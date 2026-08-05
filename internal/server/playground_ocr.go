@@ -2,9 +2,9 @@ package server
 
 import (
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
@@ -32,8 +32,13 @@ func playgroundOCRUpload(c *fiber.Ctx, cfg *config.Config) error {
 	if model == "" { model = strings.TrimSpace(c.FormValue("model")) }
 	if model == "" { model = playgroundDefaultModel(cfg) }
 	maxTokens := 2048
-	if raw := strings.TrimSpace(c.FormValue("max_tokens")); raw != "" { _, _ = fmt.Sscanf(raw, "%d", &maxTokens) }
-	if maxTokens < 1 { maxTokens = 2048 }
+	if raw := strings.TrimSpace(c.FormValue("max_tokens")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 32768 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "max_tokens must be an integer between 1 and 32768", "code": "max_tokens_invalid"})
+		}
+		maxTokens = parsed
+	}
 	stream := false
 	content := []map[string]interface{}{{"type":"text", "text":prompt}, {"type":"image_url", "image_url":map[string]string{"url":"data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(body)}}}
 	req := &models.OpenAIRequest{Model:model, Messages:[]models.OpenAIMessage{{Role:"user", Content:content}}, Stream:&stream}

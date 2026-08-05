@@ -35,6 +35,27 @@ func TestPlaygroundOCRUploadSendsVisionContent(t *testing.T) {
 	if resp.StatusCode!=http.StatusOK || !strings.Contains(string(data),"识别结果") {t.Fatalf("unexpected OCR response %d %s",resp.StatusCode,data)}
 }
 
+func TestPlaygroundOCRUploadRejectsInvalidMaxTokens(t *testing.T) {
+	app := fiber.New()
+	setupPlaygroundEndpoints(app, &config.Config{})
+	baseURL := startLoopbackTestServer(t, app)
+	token := playgroundToken(t, baseURL)
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	part, _ := writer.CreateFormFile("image", "fake.png")
+	_, _ = part.Write(tinyPNG)
+	_ = writer.WriteField("max_tokens", "invalid")
+	_ = writer.Close()
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/playground/ocr/upload", &form)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Playground-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "max_tokens_invalid") { t.Fatalf("unexpected OCR validation response %d %s", resp.StatusCode, body) }
+}
+
 func TestPlaygroundImageGenerationUsesDedicatedEndpointAndKey(t *testing.T) {
 	encoded:=base64.StdEncoding.EncodeToString(tinyPNG)
 	upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){

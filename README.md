@@ -319,7 +319,7 @@ The Playground page is structured for long-term expansion:
 
 - **Chat**: streaming response, stop generation, reasoning/text split, manual model entry
 - **Image workflow**: optional independent image API with bounded local previews (requires `IMAGE_API_URL`, `IMAGE_API_KEY`, and `IMAGE_MODEL`; never falls back to the chat key)
-- **OCR**: JPEG/PNG/WebP upload to a configured vision-capable chat model (`OCR_MODEL` optional); image bytes are not persisted by the proxy
+- **OCR**: select, drag, or paste one JPEG/PNG/WebP image (up to 10 MiB) to a configured vision-capable chat model (`OCR_MODEL` optional); the page distinguishes upload progress from model recognition, supports cancellation, and never persists image bytes
 - **PPT**: validated `ppt-outline/v1` deck preview plus Markdown/HTML export (no `.pptx` export)
 - **Providers / Keys**: UI scaffold for multiple providers, base URLs, and key labels
 - **Templates**: persisted task presets with workflow metadata
@@ -332,7 +332,7 @@ Prompt Archive is independent from diagnostics:
 - Use `PROMPT_ARCHIVE_DB_PATH` to change the database location
 - Use `PROMPT_ARCHIVE_RETENTION` to control retention
 
-It stores redacted request summaries and metadata for search, export, and debugging.
+It stores redacted request summaries and metadata for search, export, and debugging. Consecutive requests with an explicit `x-anthropic-session-id` are compacted through an opaque, locally HMAC-derived session key; the raw session ID is never retained, and the proxy never infers sessions from request IDs, parent IDs, timestamps, or request contents. Records without an explicit session, incompatible records, and checkpoints remain full snapshots. Details and exports always reconstruct standalone redacted payloads.
 
 ## Build for Distribution
 

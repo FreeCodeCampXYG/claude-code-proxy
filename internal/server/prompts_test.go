@@ -137,8 +137,9 @@ func TestPromptsExportValidationAndMarkdownHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/markdown") || resp.Header.Get("Content-Disposition") != `attachment; filename="prompts-archive.md"` {
-		t.Fatalf("unexpected Markdown response status=%d content-type=%q disposition=%q", resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Disposition"))
+	markdownBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/markdown") || resp.Header.Get("Content-Disposition") != `attachment; filename="prompts-archive.md"` || !strings.Contains(string(markdownBody), "```json") {
+		t.Fatalf("unexpected Markdown response status=%d content-type=%q disposition=%q body=%s", resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Disposition"), markdownBody)
 	}
 }
 

@@ -76,7 +76,9 @@ func handleMessages(c *fiber.Ctx, cfg *config.Config, store *diagnostics.Store, 
 	trace.capture(diagnostics.ContentBoundaryClaudeRequest, 0, c.Body())
 	trace.setClaudeRequestMetrics(c.Body(), claudeReq)
 	if promptStore != nil {
-		promptStore.Enqueue(promptarchive.BuildRecord(c.GetRespHeader("X-Request-ID"), c.Body(), claudeReq, time.Now()))
+		// Only this explicit client session identifier may opt a record into archive compaction.
+		// Do not infer a session from request IDs, parent IDs, timestamps, or request content.
+		promptStore.Enqueue(promptarchive.BuildRecord(c.GetRespHeader("X-Request-ID"), c.Body(), claudeReq, time.Now(), strings.TrimSpace(c.Get("x-anthropic-session-id"))))
 	}
 
 	openaiReq, err := converter.ConvertRequest(claudeReq, cfg)

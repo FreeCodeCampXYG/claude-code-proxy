@@ -93,7 +93,7 @@ func TestPlaygroundPageReflectsImplementedCapabilities(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected page status=%d body=%s", resp.StatusCode, body)
 	}
-	for _, fragment := range []string{"window.__localPageToken=", "function escapeHtml", "function processFrame", "图片工作流", "OCR 识图", "PPT 创作", "ppt-outline/v1", "IMAGE_API_URL、IMAGE_API_KEY、IMAGE_MODEL"} {
+	for _, fragment := range []string{"window.__localPageToken=", "function escapeHtml", "function processFrame", "XMLHttpRequest", "pasteOcrImage", "ocrPreviewURL", "图片工作流", "OCR 识图", "PPT 创作", "ppt-outline/v1", "IMAGE_API_URL、IMAGE_API_KEY、IMAGE_MODEL"} {
 		if !strings.Contains(page, fragment) {
 			t.Fatalf("playground page missing %q", fragment)
 		}

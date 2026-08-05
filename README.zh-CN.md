@@ -239,7 +239,7 @@ EOF
 
 - **通用对话**：流式输出、停止生成、reasoning/text 分离、手动模型
 - **图片工作流**：可选独立图片 API，返回有界本地预览（需同时配置 `IMAGE_API_URL`、`IMAGE_API_KEY`、`IMAGE_MODEL`，绝不回退复用聊天 key）
-- **OCR**：上传 JPEG/PNG/WebP 到支持视觉的聊天模型（可选 `OCR_MODEL`）；代理不持久化图片字节
+- **OCR**：上传、拖放或粘贴一张 JPEG/PNG/WebP（最大 10 MiB）到支持视觉的聊天模型（可选 `OCR_MODEL`）；页面会区分上传进度与模型识别等待，可取消；前端校验只为即时提示，服务端仍校验真实文件类型，代理不持久化图片字节
 - **PPT**：校验 `ppt-outline/v1` 结构并提供预览、Markdown/HTML 导出（不生成 `.pptx`）
 - **模型与 Key**：为多 Provider、多 Key、多接口预留
 - **模板**：任务模板和 workflow 元数据
@@ -252,7 +252,7 @@ Prompt 存档是独立功能：
 - `PROMPT_ARCHIVE_DB_PATH` 指定数据库
 - `PROMPT_ARCHIVE_RETENTION` 控制保留期
 
-它会存储脱敏后的请求摘要与元数据，用于搜索、导出和排障。
+它会存储脱敏后的请求摘要与元数据，用于搜索、导出和排障。对客户端明确提供 `x-anthropic-session-id` 的连续请求，会使用本机随机 HMAC 形成不可逆会话键并进行可校验的增量压缩；不会保存原始会话 ID，也不会根据 request ID、父 ID、时间或提示词内容猜测会话。无会话标识、校验失败或达到检查点时保存完整快照；详情和导出始终自动还原为独立可读的脱敏内容。
 
 ## 构建发布
 

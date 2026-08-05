@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,10 @@ func promptsStatus(cfg *config.Config, store *diagnostics.Store, archive *prompt
 	} else if cfg != nil && cfg.DiagnosticsRetention > 0 {
 		retention = cfg.DiagnosticsRetention.String()
 	}
+	stats := promptarchive.Statistics{}
+	if archive != nil {
+		stats, _ = archive.Statistics(context.Background())
+	}
 	return fiber.Map{
 		"enabled":         archive != nil || store != nil,
 		"archive_enabled": archive != nil,
@@ -52,7 +57,8 @@ func promptsStatus(cfg *config.Config, store *diagnostics.Store, archive *prompt
 		"capture_content": cfg != nil && cfg.DiagnosticsCaptureContent,
 		"retention":       retention,
 		"storage":         "prompt_archive sqlite when PROMPT_ARCHIVE_ENABLED=true; diagnostics metadata fallback otherwise",
-		"note":            "独立 Prompt 存档开启后写入 prompt_archive / prompt_archive_payloads；未开启时回退展示诊断事件元数据。",
+		"statistics":      stats,
+		"note":            "独立 Prompt 存档开启后写入本机脱敏数据；仅显式会话标识的连续请求会安全增量压缩，详情和导出仍返回完整可读内容。",
 		"routes":          []string{"GET /prompts/records", "GET /prompts/:id", "DELETE /prompts/:id", "GET /prompts/export"},
 	}
 }
@@ -191,6 +197,12 @@ func promptsExport(c *fiber.Ctx, archive *promptarchive.Store) error {
 		var b strings.Builder
 		for _, record := range records {
 			fmt.Fprintf(&b, "## %s\n- 时间：%s\n- 模型：%s\n- 摘要：%s\n- 消息数：%d\n- 工具数：%d\n\n", record.RequestID, record.CreatedAt.Format(time.RFC3339), record.Model, record.Summary, record.MessageCount, record.ToolCount)
+			if record.PayloadState != "unavailable" && len(record.Payload) > 0 {
+				fence := markdownCodeFence(record.Payload)
+				fmt.Fprintf(&b, "%sjson\n%s\n%s\n\n", fence, record.Payload, fence)
+			} else {
+				b.WriteString("内容无法还原。\n\n")
+			}
 		}
 		c.Set(fiber.HeaderContentType, "text/markdown; charset=utf-8")
 		c.Set(fiber.HeaderContentDisposition, `attachment; filename="prompts-archive.md"`)
@@ -206,6 +218,17 @@ func promptsExport(c *fiber.Ctx, archive *promptarchive.Store) error {
 	}
 }
 
+func markdownCodeFence(payload []byte) string {
+	longest, current := 0, 0
+	for _, char := range payload {
+		if char == '`' {
+			current++
+			if current > longest { longest = current }
+		} else { current = 0 }
+	}
+	return strings.Repeat("`", max(3, longest+1))
+}
+
 func promptArchiveExportRecords(c *fiber.Ctx, archive *promptarchive.Store, query promptarchive.Query) ([]promptarchive.Record, error) {
 	query.Offset = 0 // Exports always start at the first matching record.
 	query.Limit = 200
@@ -218,6 +241,13 @@ func promptArchiveExportRecords(c *fiber.Ctx, archive *promptarchive.Store, quer
 		remaining := promptExportMaxRecords - len(records)
 		if len(page) > remaining {
 			page = page[:remaining]
+		}
+		for index, record := range page {
+			detail, detailErr := archive.Detail(c.Context(), record.RequestID)
+			if detailErr != nil {
+				return nil, detailErr
+			}
+			page[index] = detail
 		}
 		records = append(records, page...)
 		if len(page) < query.Limit || len(records) == promptExportMaxRecords {
