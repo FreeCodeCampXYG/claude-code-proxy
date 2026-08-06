@@ -115,15 +115,22 @@ func TestPromptArchiveLegacySchemaMigratesAndReopens(t *testing.T) {
 			summary TEXT NOT NULL DEFAULT '',
 			truncated INTEGER NOT NULL DEFAULT 0,
 			payload_hash TEXT NOT NULL DEFAULT ''
-		);
-		CREATE TABLE prompt_archive_payloads (
-			request_id TEXT PRIMARY KEY,
-			created_at INTEGER NOT NULL,
-			payload BLOB NOT NULL,
-			FOREIGN KEY (request_id) REFERENCES prompt_archive(request_id) ON DELETE CASCADE
-		);
-		INSERT INTO prompt_archive(request_id, created_at, model, payload_hash) VALUES ('legacy', 1000, 'old-model', ?);
-		INSERT INTO prompt_archive_payloads(request_id, created_at, payload) VALUES ('legacy', 1000, ?);`, hashPayload([]byte(`{"legacy":true}`)), []byte(`{"legacy":true}`))
+		)`)
+	if err == nil {
+		_, err = legacy.Exec(`
+			CREATE TABLE prompt_archive_payloads (
+				request_id TEXT PRIMARY KEY,
+				created_at INTEGER NOT NULL,
+				payload BLOB NOT NULL,
+				FOREIGN KEY (request_id) REFERENCES prompt_archive(request_id) ON DELETE CASCADE
+			)`)
+	}
+	if err == nil {
+		_, err = legacy.Exec(`INSERT INTO prompt_archive(request_id, created_at, model, payload_hash) VALUES (?, ?, ?, ?)`, "legacy", 1000, "old-model", hashPayload([]byte(`{"legacy":true}`)))
+	}
+	if err == nil {
+		_, err = legacy.Exec(`INSERT INTO prompt_archive_payloads(request_id, created_at, payload) VALUES (?, ?, ?)`, "legacy", 1000, []byte(`{"legacy":true}`))
+	}
 	if err != nil {
 		_ = legacy.Close()
 		t.Fatal(err)
@@ -148,9 +155,12 @@ func TestPromptArchiveLegacySchemaMigratesAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
 	if detail, err = store.Detail(context.Background(), "legacy"); err != nil || string(detail.Payload) != `{"legacy":true}` {
+		_ = store.Close()
 		t.Fatalf("migrated record did not survive reopen: %#v err=%v", detail, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
