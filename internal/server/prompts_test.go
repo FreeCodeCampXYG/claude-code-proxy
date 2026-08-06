@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,67 @@ func TestPromptsExportCapsAtOneThousand(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || len(result.Records) != promptExportMaxRecords || first != "record-0000" {
 		t.Fatalf("unexpected bounded export: status=%d count=%d first=%q", resp.StatusCode, len(result.Records), first)
+	}
+}
+
+func TestPromptsExportReportsUnavailablePayloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive.db")
+	archive, err := promptarchive.Open(path, promptarchive.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+	if err := archive.Insert(context.Background(), promptarchive.Record{RequestID: "missing", CreatedAt: time.Now(), Model: "test", Payload: []byte(`{"value":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM prompt_archive_payloads WHERE request_id = 'missing'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive, err = promptarchive.Open(path, promptarchive.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := fiber.New()
+	setupPromptsEndpoints(app, &config.Config{}, nil, archive)
+	baseURL := startLoopbackTestServer(t, app)
+	token := promptsTokenForTest(t, baseURL)
+	for _, format := range []string{"json", "markdown"} {
+		t.Run(format, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, baseURL+"/prompts/export?format="+format, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Prompts-Token", token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected status=%d body=%s", resp.StatusCode, body)
+			}
+			if format == "json" {
+				var result struct{ Records []promptarchive.Record `json:"records"` }
+				if err := json.Unmarshal(body, &result); err != nil || len(result.Records) != 1 || result.Records[0].PayloadState != "unavailable" || len(result.Records[0].Payload) != 0 {
+					t.Fatalf("unexpected unavailable JSON export: records=%#v err=%v", result.Records, err)
+				}
+			} else if strings.Contains(string(body), "```json") || !strings.Contains(string(body), "内容无法还原。") {
+				t.Fatalf("unexpected unavailable Markdown export: %s", body)
+			}
+		})
 	}
 }
 

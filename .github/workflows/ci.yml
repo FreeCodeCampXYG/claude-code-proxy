@@ -10,6 +10,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         go-version: ['1.24']
@@ -40,7 +41,8 @@ jobs:
       run: go mod download
 
     - name: Run tests
-      run: go test -v -race -coverprofile=coverage.out ./...
+      timeout-minutes: 15
+      run: go test -v -race -timeout=10m -coverprofile=coverage.out ./...
 
     - name: Upload coverage
       uses: codecov/codecov-action@v4
@@ -53,6 +55,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
     - name: Checkout code
@@ -67,14 +70,19 @@ jobs:
       run: go mod download
 
     - name: Build binary
+      timeout-minutes: 5
       run: make build
 
-    - name: Verify binary
-      run: ./claude-code-proxy --version || ./claude-code-proxy --help
+    - name: Verify binary version
+      timeout-minutes: 2
+      run: |
+        test -x ./claude-code-proxy
+        test "$(./claude-code-proxy version)" = "claude-code-proxy dev"
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
     - name: Checkout code
@@ -86,6 +94,7 @@ jobs:
         go-version: '1.24'
 
     - name: golangci-lint
+      timeout-minutes: 7
       uses: golangci/golangci-lint-action@v8
       with:
         version: v2.5.0

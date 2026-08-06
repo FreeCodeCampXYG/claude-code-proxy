@@ -12,6 +12,7 @@ jobs:
   windows-smoke:
     name: Windows test and build smoke
     runs-on: windows-latest
+    timeout-minutes: 25
 
     steps:
     - name: Checkout code
@@ -28,7 +29,8 @@ jobs:
         git diff --exit-code -- go.mod go.sum
 
     - name: Run tests
-      run: go test ./...
+      timeout-minutes: 15
+      run: go test -timeout=10m ./...
 
     - name: Generate Windows icon resource
       shell: pwsh
@@ -45,6 +47,7 @@ jobs:
     - name: Smoke test Windows runtime diagnostics
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
         $mockPort = 18083
         $mock = Start-Job -ArgumentList $mockPort -ScriptBlock {
           param($port)
@@ -82,22 +85,27 @@ jobs:
         }
 
         $mockReady = $false
-        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        $process = $null
+        $proxyStdout = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.out.log"
+        $proxyStderr = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.err.log"
+        try {
+          for ($attempt = 0; $attempt -lt 50; $attempt++) {
           if ((Receive-Job -Job $mock -Keep) -contains 'MOCK_READY') {
             $mockReady = $true
             break
           }
-          if ($mock.State -in @('Completed', 'Failed', 'Stopped')) { break }
-          Start-Sleep -Milliseconds 100
-        }
-        if (-not $mockReady) { throw "mock upstream did not start: $($mock.State)" }
+            if ($mock.State -in @('Completed', 'Failed', 'Stopped')) { break }
+            Start-Sleep -Milliseconds 100
+          }
+          if (-not $mockReady) {
+            $mockOutput = @(Receive-Job -Job $mock -Keep -ErrorAction SilentlyContinue)
+            throw "mock upstream did not start: state=$($mock.State), output=$($mockOutput -join '; ')"
+          }
 
         $env:OPENAI_BASE_URL = "http://127.0.0.1:$mockPort/v1"
         $env:OPENAI_PROVIDER = "newapi"
         $env:PORT = "18082"
         $env:DIAGNOSTICS_DB_PATH = Join-Path $env:RUNNER_TEMP "claude-code-proxy-diagnostics.db"
-        $proxyStdout = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.out.log"
-        $proxyStderr = Join-Path $env:RUNNER_TEMP "claude-code-proxy-smoke.err.log"
         $process = Start-Process -FilePath "$PWD/claude-code-proxy.exe" -ArgumentList "-d" -RedirectStandardOutput $proxyStdout -RedirectStandardError $proxyStderr -PassThru
         try {
           $health = $null
@@ -143,21 +151,29 @@ jobs:
           if ([int]$analytics.total -lt 1) { throw "diagnostics analytics total was less than one: $($analytics | ConvertTo-Json -Compress)" }
           if ($health.diagnostics_enabled -ne $true) { throw "diagnostics were not enabled" }
         } catch {
-          $exitCode = if ($process.HasExited) { $process.ExitCode } else { "running" }
-          Write-Host "Proxy exited: $($process.HasExited) code=$exitCode"
+          $exitCode = if ($null -ne $process -and $process.HasExited) { $process.ExitCode } else { "running/not started" }
+          $processState = if ($null -ne $process) { "exited=$($process.HasExited)" } else { "not started" }
+          Write-Host "Proxy state: $processState code=$exitCode"
           if (Test-Path $proxyStdout) { Write-Host "--- proxy stdout ---"; Get-Content $proxyStdout -ErrorAction SilentlyContinue }
           if (Test-Path $proxyStderr) { Write-Host "--- proxy stderr ---"; Get-Content $proxyStderr -ErrorAction SilentlyContinue }
           throw
         } finally {
-          if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-          Stop-Job -Job $mock -ErrorAction SilentlyContinue
-          Remove-Job -Job $mock -Force -ErrorAction SilentlyContinue
+          if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        }
+        } catch {
+          throw
+        } finally {
+          if ($null -ne $mock) {
+            Stop-Job -Job $mock -ErrorAction SilentlyContinue
+            Remove-Job -Job $mock -Force -ErrorAction SilentlyContinue
+          }
         }
 
   release:
     name: Create Release
     needs: windows-smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - name: Checkout code
@@ -174,12 +190,15 @@ jobs:
       run: go mod download
 
     - name: Run tests
-      run: go test -v ./...
+      timeout-minutes: 15
+      run: go test -v -timeout=10m ./...
 
     - name: Generate Windows icon resource
+      timeout-minutes: 5
       run: go run github.com/akavel/rsrc@v0.10.2 -arch amd64 -ico assets/windows/claude-code-proxy.ico -o cmd/claude-code-proxy/rsrc_windows_amd64.syso
 
     - name: Build all platforms
+      timeout-minutes: 10
       run: make VERSION=${{ github.ref_name }} build-all
 
     - name: Create checksums

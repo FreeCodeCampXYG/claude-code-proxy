@@ -45,19 +45,19 @@ clean:
 # Run tests
 test:
 	@echo "🧪 Running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST) -v -timeout=10m ./...
 
 # Run tests with coverage
 test-coverage:
 	@echo "🧪 Running tests with coverage..."
-	$(GOTEST) -v -coverprofile=coverage.out ./...
+	$(GOTEST) -v -timeout=10m -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "✅ Coverage report: coverage.html"
 
 # Run benchmarks
 bench:
 	@echo "⚡ Running benchmarks..."
-	$(GOTEST) -bench=. -benchmem ./internal/converter
+	$(GOTEST) -bench=. -benchmem -timeout=15m ./internal/converter
 
 # Format code
 fmt:
@@ -67,7 +67,7 @@ fmt:
 # Lint (requires golangci-lint)
 lint:
 	@echo "🔍 Linting..."
-	golangci-lint run || echo "⚠️  Install golangci-lint: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
+	golangci-lint run --timeout=5m
 
 # Download dependencies
 deps:

@@ -52,8 +52,13 @@ func playgroundOCRUpload(c *fiber.Ctx, cfg *config.Config) error {
 		return c.Status(status).JSON(fiber.Map{"error":message,"code":code})
 	}
 	result := ""
-	if len(resp.Choices)>0 { result, _ = resp.Choices[0].Message.Content.(string) }
-	return c.JSON(fiber.Map{"task":"ocr", "content":result, "usage":resp.Usage, "model":model})
+	if len(resp.Choices) > 0 {
+		result, _ = resp.Choices[0].Message.Content.(string)
+	}
+	if strings.TrimSpace(result) == "" {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "OCR 上游未返回文字内容", "code": "ocr_empty_response"})
+	}
+	return c.JSON(fiber.Map{"task": "ocr", "content": result, "usage": resp.Usage, "model": model})
 }
 
 func playgroundDefaultModel(cfg *config.Config) string {

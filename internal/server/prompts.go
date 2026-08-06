@@ -230,32 +230,7 @@ func markdownCodeFence(payload []byte) string {
 }
 
 func promptArchiveExportRecords(c *fiber.Ctx, archive *promptarchive.Store, query promptarchive.Query) ([]promptarchive.Record, error) {
-	query.Offset = 0 // Exports always start at the first matching record.
-	query.Limit = 200
-	records := make([]promptarchive.Record, 0, promptExportMaxRecords)
-	for len(records) < promptExportMaxRecords {
-		page, err := archive.Query(c.Context(), query)
-		if err != nil {
-			return nil, err
-		}
-		remaining := promptExportMaxRecords - len(records)
-		if len(page) > remaining {
-			page = page[:remaining]
-		}
-		for index, record := range page {
-			detail, detailErr := archive.Detail(c.Context(), record.RequestID)
-			if detailErr != nil {
-				return nil, detailErr
-			}
-			page[index] = detail
-		}
-		records = append(records, page...)
-		if len(page) < query.Limit || len(records) == promptExportMaxRecords {
-			break
-		}
-		query.Offset += len(page)
-	}
-	return records, nil
+	return archive.Export(c.Context(), query, promptExportMaxRecords)
 }
 
 func promptsDelete(c *fiber.Ctx, archive *promptarchive.Store) error {
