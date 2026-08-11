@@ -130,8 +130,26 @@ func playgroundChatStream(c *fiber.Ctx, cfg *config.Config) error {
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.Copy(w, resp.Body)
-		_ = w.Flush()
+		buffer := make([]byte, 32*1024)
+		for {
+			read, readErr := resp.Body.Read(buffer)
+			if read > 0 {
+				if _, writeErr := w.Write(buffer[:read]); writeErr != nil {
+					cancel()
+					return
+				}
+				if flushErr := w.Flush(); flushErr != nil {
+					cancel()
+					return
+				}
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					_ = writeSSEEvent(w, "error", fiber.Map{"error": fmt.Sprintf("upstream stream failed: %v", readErr)})
+				}
+				return
+			}
+		}
 	})
 	return nil
 }

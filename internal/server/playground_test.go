@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/claude-code-proxy/proxy/internal/config"
 	"github.com/gofiber/fiber/v2"
@@ -48,6 +50,65 @@ func TestPlaygroundChatStreamProxiesUpstreamSSE(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"content":"hi"`) || !strings.Contains(string(body), "[DONE]") {
 		t.Fatalf("unexpected stream status=%d body=%s", resp.StatusCode, body)
 	}
+}
+
+func TestPlaygroundChatStreamFlushesBeforeUpstreamEOF(t *testing.T) {
+	firstFrameSent := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream response writer does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
+		flusher.Flush()
+		close(firstFrameSent)
+		<-releaseUpstream
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	app := fiber.New()
+	setupPlaygroundEndpoints(app, &config.Config{OpenAIBaseURL: upstream.URL, OpenAIAPIKey: "test-key", SonnetModel: "gpt-test"})
+	baseURL := startLoopbackTestServer(t, app)
+	page := getLoopbackTest(t, baseURL, "/playground")
+	pageBytes, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	token := extractLocalPageToken(t, string(pageBytes))
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/playground/chat/stream", bytes.NewBufferString(`{"prompt":"hello","model":"gpt-test","max_tokens":32}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Playground-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	<-firstFrameSent
+
+	lineResult := make(chan string, 1)
+	go func() {
+		line, readErr := bufio.NewReader(resp.Body).ReadString('\n')
+		if readErr != nil {
+			lineResult <- "read error: " + readErr.Error()
+			return
+		}
+		lineResult <- line
+	}()
+	select {
+	case line := <-lineResult:
+		if !strings.Contains(line, `"content":"first"`) {
+			t.Fatalf("unexpected first streamed line %q", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("first SSE frame was not visible before upstream EOF")
+	}
+	close(releaseUpstream)
 }
 
 func TestPlaygroundChatStreamEmitsUpstreamErrors(t *testing.T) {
